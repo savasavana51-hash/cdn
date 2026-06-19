@@ -901,8 +901,12 @@ class LineGrid {
     const HOLD = 1.8, FLIP_DUR = 0.65;
     const CYCLE = HOLD + FLIP_DUR, N = CURRENCIES.length;
     const easeOutCubic3 = (t) => 1 - Math.pow(1-t, 3);
-    const reveal = this.bankAccountsReveal;
-    const t      = this.productTime;
+    const opacity = this.bankAccountsReveal;  // 0→1 fade, GSAP driven
+    const t       = this.productTime;          // full clock from 0, drives all animation
+
+    // Reveal phase duration — matches GSAP tween duration (1.0s)
+    const REVEAL_DUR = 1.0;
+    const revealT    = Math.min(1, t / REVEAL_DUR);  // 0→1 over first second
 
     // Render one currency to fCtx
     const renderCurrency = (idx, scaleX, scale) => {
@@ -924,7 +928,7 @@ class LineGrid {
     const scanAndDrawBA = () => {
       const data = fCtx.getImageData(0, 0, W*DPR, H*DPR), stride = Math.round(W*DPR);
       const getA = (x, y) => { const px=Math.round(Math.max(0,Math.min(W*DPR-1,x*DPR))); const py=Math.round(Math.max(0,Math.min(H*DPR-1,y*DPR))); return data.data[(py*stride+px)*4+3]/255; };
-      this.ctx.fillStyle = `rgba(${this.LINE_COLOR},${reveal})`;
+      this.ctx.fillStyle = `rgba(${this.LINE_COLOR},${opacity})`;
       for (let col = 0; col < COLS; col++) {
         const colX = this.colXCache[col], colEnd = colX + COL_W;
         for (let y = 0; y <= H; y += LINE_GAP) {
@@ -936,13 +940,15 @@ class LineGrid {
       }
     };
 
-    if (reveal < 1) {
-      renderCurrency(0, 1, easeOutCubic3(reveal));
+    // Use productTime for all phases — revealT drives the scale-up, loopT drives the flip cycle
+    if (revealT < 1) {
+      renderCurrency(0, 1, easeOutCubic3(revealT));
       scanAndDrawBA();
     } else {
-      const cyclePos = t % (CYCLE * N);
-      const curIdx = Math.floor(cyclePos / CYCLE) % N;
-      const cycleT = cyclePos % CYCLE;
+      const loopT    = t - REVEAL_DUR;
+      const cyclePos = loopT % (CYCLE * N);
+      const curIdx   = Math.floor(cyclePos / CYCLE) % N;
+      const cycleT   = cyclePos % CYCLE;
       if (cycleT < HOLD) {
         renderCurrency(curIdx, 1, 1); scanAndDrawBA();
       } else {
@@ -964,11 +970,11 @@ class LineGrid {
     const fCtx = this.fCtx;
     const ctx  = this.ctx;
     const t    = this.productTime;
-    const reveal = this.digitalAssetReveal;
 
     const LINE_H_L = MAX_H * 0.25, LINE_H_T = MAX_H * 0.50, LINE_H_R = MAX_H * 1.00;
     const easeInOut = (t) => t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t+2,3)/2;
     const easeOut3  = (t) => 1 - Math.pow(1-t, 3);
+    const opacity   = this.digitalAssetReveal;  // fade only
 
     const projectV = (v, cx, cy, s) => [
       cx + (v[0] - v[2]) * Math.cos(Math.PI/6) * s,
@@ -988,7 +994,7 @@ class LineGrid {
     const scanDA = (lineH) => {
       const data = fCtx.getImageData(0,0,W*DPR,H*DPR), stride = Math.round(W*DPR);
       const getA = (x,y) => { const px=Math.round(Math.max(0,Math.min(W*DPR-1,x*DPR))); const py=Math.round(Math.max(0,Math.min(H*DPR-1,y*DPR))); return data.data[(py*stride+px)*4+3]/255; };
-      ctx.fillStyle = `rgba(${this.LINE_COLOR},${reveal})`;
+      ctx.fillStyle = `rgba(${this.LINE_COLOR},${opacity})`;
       for (let col=0; col<COLS; col++) {
         const colX = this.colXCache[col], colEnd = colX+COL_W;
         for (let y=0; y<=H; y+=LINE_GAP) {
@@ -1044,7 +1050,7 @@ class LineGrid {
       const sx = cx + Math.cos(ang)*SCATTER_R, sy = cy + Math.sin(ang)*SCATTER_R*0.6;
       const px = sx + (cx-sx)*eased, py = sy + (cy-sy)*eased;
       const alpha = 1 - eased;
-      if (alpha > 0.01) { ctx.globalAlpha = alpha*reveal; drawCubeDA(px, py, SMALL_S, 0); ctx.globalAlpha = 1; }
+      if (alpha > 0.01) { ctx.globalAlpha = alpha*opacity; drawCubeDA(px, py, SMALL_S, 0); ctx.globalAlpha = 1; }
     });
 
     // Growing + rotating merged cube
