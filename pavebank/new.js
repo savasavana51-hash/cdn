@@ -888,7 +888,6 @@ class LineGrid {
   // =========================================================================
 
   _drawBankAccounts() {
-    if (this.bankAccountsReveal <= 0) return;
     const { W, H, DPR, COLS, COL_W, LINE_GAP, RADIUS, THRESHOLD, MAX_H } = this;
     const fCtx = this.fCtx;
 
@@ -898,17 +897,13 @@ class LineGrid {
       { path: 'M126.128 0H93.9999L63.0013 72.2883L32.0026 0H0L39.6896 84.1168H10.6048V102.879H47.5333V117.249H10.6048V136.011H47.5333V171.465H77.779V136.011H113.107V117.249H77.779V102.879H113.107V84.1168H86.1561L126.128 0Z', vw: 127, vh: 172 },
     ];
 
-    const HOLD = 1.8, FLIP_DUR = 0.65;
+    const HOLD = 1.8, FLIP_DUR = 0.65, REVEAL_DUR = 0.6;
     const CYCLE = HOLD + FLIP_DUR, N = CURRENCIES.length;
-    const easeOutCubic3 = (t) => 1 - Math.pow(1-t, 3);
-    const opacity = this.bankAccountsReveal;  // 0→1 fade, GSAP driven
-    const t       = this.productTime;          // full clock from 0, drives all animation
+    const easeOut = (t) => 1 - Math.pow(1-t, 3);
+    const t = this.productTime;
+    // First REVEAL_DUR seconds: dollar scales up. Then flip loop.
+    const revealT = Math.min(1, t / REVEAL_DUR);
 
-    // Reveal phase duration — matches GSAP tween duration (1.0s)
-    const REVEAL_DUR = 1.0;
-    const revealT    = Math.min(1, t / REVEAL_DUR);  // 0→1 over first second
-
-    // Render one currency to fCtx
     const renderCurrency = (idx, scaleX, scale) => {
       const cur = CURRENCIES[idx];
       fCtx.clearRect(0, 0, W*DPR, H*DPR);
@@ -925,10 +920,10 @@ class LineGrid {
       fCtx.restore(); fCtx.restore();
     };
 
-    const scanAndDrawBA = () => {
+    const scan = () => {
       const data = fCtx.getImageData(0, 0, W*DPR, H*DPR), stride = Math.round(W*DPR);
       const getA = (x, y) => { const px=Math.round(Math.max(0,Math.min(W*DPR-1,x*DPR))); const py=Math.round(Math.max(0,Math.min(H*DPR-1,y*DPR))); return data.data[(py*stride+px)*4+3]/255; };
-      this.ctx.fillStyle = `rgba(${this.LINE_COLOR},${opacity})`;
+      this.ctx.fillStyle = `rgba(${this.LINE_COLOR},1)`;
       for (let col = 0; col < COLS; col++) {
         const colX = this.colXCache[col], colEnd = colX + COL_W;
         for (let y = 0; y <= H; y += LINE_GAP) {
@@ -940,22 +935,21 @@ class LineGrid {
       }
     };
 
-    // Use productTime for all phases — revealT drives the scale-up, loopT drives the flip cycle
     if (revealT < 1) {
-      renderCurrency(0, 1, easeOutCubic3(revealT));
-      scanAndDrawBA();
+      renderCurrency(0, 1, easeOut(revealT));
+      scan();
     } else {
       const loopT    = t - REVEAL_DUR;
       const cyclePos = loopT % (CYCLE * N);
       const curIdx   = Math.floor(cyclePos / CYCLE) % N;
       const cycleT   = cyclePos % CYCLE;
       if (cycleT < HOLD) {
-        renderCurrency(curIdx, 1, 1); scanAndDrawBA();
+        renderCurrency(curIdx, 1, 1); scan();
       } else {
         const flipT = (cycleT - HOLD) / FLIP_DUR;
-        if (flipT < 0.5) { renderCurrency(curIdx, 1 - easeOutCubic3(flipT*2), 1); }
-        else             { renderCurrency((curIdx+1)%N, easeOutCubic3((flipT-0.5)*2), 1); }
-        scanAndDrawBA();
+        if (flipT < 0.5) { renderCurrency(curIdx, 1 - easeOut(flipT*2), 1); }
+        else             { renderCurrency((curIdx+1)%N, easeOut((flipT-0.5)*2), 1); }
+        scan();
       }
     }
   }
@@ -965,7 +959,6 @@ class LineGrid {
   // =========================================================================
 
   _drawDigitalAsset() {
-    if (this.digitalAssetReveal <= 0) return;
     const { W, H, DPR, COLS, COL_W, LINE_GAP, RADIUS, THRESHOLD, MAX_H } = this;
     const fCtx = this.fCtx;
     const ctx  = this.ctx;
@@ -974,7 +967,6 @@ class LineGrid {
     const LINE_H_L = MAX_H * 0.25, LINE_H_T = MAX_H * 0.50, LINE_H_R = MAX_H * 1.00;
     const easeInOut = (t) => t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t+2,3)/2;
     const easeOut3  = (t) => 1 - Math.pow(1-t, 3);
-    const opacity   = this.digitalAssetReveal;  // fade only
 
     const projectV = (v, cx, cy, s) => [
       cx + (v[0] - v[2]) * Math.cos(Math.PI/6) * s,
@@ -994,7 +986,7 @@ class LineGrid {
     const scanDA = (lineH) => {
       const data = fCtx.getImageData(0,0,W*DPR,H*DPR), stride = Math.round(W*DPR);
       const getA = (x,y) => { const px=Math.round(Math.max(0,Math.min(W*DPR-1,x*DPR))); const py=Math.round(Math.max(0,Math.min(H*DPR-1,y*DPR))); return data.data[(py*stride+px)*4+3]/255; };
-      ctx.fillStyle = `rgba(${this.LINE_COLOR},${opacity})`;
+      ctx.fillStyle = `rgba(${this.LINE_COLOR},1)`;
       for (let col=0; col<COLS; col++) {
         const colX = this.colXCache[col], colEnd = colX+COL_W;
         for (let y=0; y<=H; y+=LINE_GAP) {
@@ -1050,7 +1042,7 @@ class LineGrid {
       const sx = cx + Math.cos(ang)*SCATTER_R, sy = cy + Math.sin(ang)*SCATTER_R*0.6;
       const px = sx + (cx-sx)*eased, py = sy + (cy-sy)*eased;
       const alpha = 1 - eased;
-      if (alpha > 0.01) { ctx.globalAlpha = alpha*opacity; drawCubeDA(px, py, SMALL_S, 0); ctx.globalAlpha = 1; }
+      if (alpha > 0.01) { ctx.globalAlpha = alpha; drawCubeDA(px, py, SMALL_S, 0); ctx.globalAlpha = 1; }
     });
 
     // Growing + rotating merged cube
@@ -1227,15 +1219,14 @@ const grid2 = new LineGrid('#section-2', {
 // Initialise gyro rings (needed for pavenet visual)
 window.addEventListener('load', () => { grid2._initGyro(); });
 
-// Switch grid2 to a product visual. Called from animations.js.
-// Instantly hides previous, resets time, GSAP then tweens the reveal prop.
+// Switch grid2 to a product visual. Instantly clears canvas, resets clock.
+// productTime drives all reveal + loop animation for each visual.
 window.switchProductVisual = (visual) => {
-  grid2.productVisual      = visual;
-  grid2.productTime        = 0;
-  grid2.bankAccountsReveal = 0;
-  grid2.digitalAssetReveal = 0;
-  grid2.gyroScale          = 0;
-  grid2.gyroReveal         = 0;
+  grid2.productVisual = visual;
+  grid2.productTime   = 0;
+  // Gyro state reset for pavenet
+  grid2.gyroScale  = 0;
+  grid2.gyroReveal = 0;
 };
 
 const grid3 = new LineGrid('#section-3', {
