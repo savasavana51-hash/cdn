@@ -1,11 +1,12 @@
 // =========================================================================
-// LINEGRID.JS — Canvas generative art system
+// LINEGRID_COLUMN.JS — Canvas generative art system (column variant)
+// Column width: 0.4rem | Gap: 0.1rem | Columns: auto-fill from canvas width
 // =========================================================================
 
 const LINEGRID_DEFAULTS = {
   // All values in rem — 1rem = 50px baseline
-  colRem:      2.2,
-  gapRem:      0.2,
+  colRem:      0.4,
+  gapRem:      0.1,
   lineGapRem:  0.2,
   minHRem:     0.02,
   maxHRem:     0.12,
