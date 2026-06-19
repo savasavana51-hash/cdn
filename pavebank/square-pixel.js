@@ -720,7 +720,7 @@ class LineGrid {
         let x = Math.sin(phi)*Math.cos(theta), y = Math.cos(phi), z = Math.sin(phi)*Math.sin(theta);
         const x1 = x*cosA + z*sinA, z1 = -x*sinA + z*cosA;
         const y2 = y*cosT - z1*sinT, z2 = y*sinT + z1*cosT;
-        const rx = x1*GLOBE_R, ry = y2*GLOBE_R, rz = z2*GLOBE_R;
+        const rx = x1*GLOBE_R, ry = -y2*GLOBE_R, rz = z2*GLOBE_R;
         const s  = FOCAL / (FOCAL + rz + 300);
         const sx = GLOBE_CX + rx * s, sy = GLOBE_CY + ry * s;
         const behind = rz < -GLOBE_R * 0.1;
@@ -782,7 +782,7 @@ class LineGrid {
       if (rz < -GLOBE_R * 0.1) return;
       const s  = FOCAL / (FOCAL + rz + 300);
       const sx = GLOBE_CX + x1*GLOBE_R * s;
-      const sy = GLOBE_CY + y2*GLOBE_R * s;
+      const sy = GLOBE_CY + (-y2)*GLOBE_R * s;
       const phase = this.waveTime * 2.2 + i * 1.7;
       const blink = (Math.sin(phase) + 1) / 2;
       const alpha = 0.2 + blink * 0.8;
