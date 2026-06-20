@@ -4,19 +4,21 @@
 // =========================================================================
 
 const LINEGRID_DEFAULTS = {
-  pixelRem:    0.02,   // background pixel size
-  stepRem:     0.18,   // grid cell spacing centre-to-centre
-  fgMinRem:    0.02,   // foreground min pixel size
-  fgMaxRem:    0.14,   // foreground max pixel size
-  fgEase:      1,      // 1 = instant
+  pixelRem:    0.02,   // background pixel size (original)
+  stepRem:     0.18,
+  fgMinRem:    0.02,
+  fgMaxRem:    0.14,
+  fgEase:      1,
   bgOpacity:   0.5,
   sizeRatio:   0.38,
   stroke:      18,
   threshold:   0.5,
   trailLen:    24,
-  hoverMinRem: 0.04,
-  hoverMaxRem: 0.16,
+  hoverMinRem: 0.03,   // trail min pixel size
+  hoverMaxRem: 0.22,   // trail max pixel size (bigger)
   hoverSpread: 3,
+  hoverLerp:   0.14,   // how fast pixels grow toward target (smooth)
+  hoverDecay:  0.55,   // energy decay per frame (lower = quicker die-off)
   lerp:        0.08,
   velDecay:    0.85,
   velScale:    0.04,
@@ -41,6 +43,9 @@ class LineGrid {
     this.HOVER_MIN_REM = cfg.hoverMinRem;
     this.HOVER_MAX_REM = cfg.hoverMaxRem;
     this.HOVER_SPREAD  = cfg.hoverSpread;
+    this.HOVER_LERP    = cfg.hoverLerp  !== undefined ? cfg.hoverLerp  : 0.18;
+    this.HOVER_DECAY   = cfg.hoverDecay !== undefined ? cfg.hoverDecay : 0.65;
+    this.hoverSz       = null;  // animated pixel size buffer, allocated in resize()
     this.PIXEL_SIZE = 0; this.STEP = 0; this.FG_MIN = 0; this.FG_MAX = 0;
     this.HOVER_MIN = 0; this.HOVER_MAX = 0;
     this.COLS = 0; this.ROWS = 0;
@@ -225,10 +230,12 @@ class LineGrid {
     this.rowYCache = [];
     this.energy    = [];
     this.fgActive  = [];
+    this.hoverSz   = [];
     for (let col = 0; col < this.COLS; col++) {
       this.colXCache.push(col * this.STEP);
       this.energy.push(new Float32Array(this.ROWS).fill(0));
       this.fgActive.push(new Float32Array(this.ROWS).fill(0));
+      this.hoverSz.push(new Float32Array(this.ROWS).fill(0));
     }
     for (let row = 0; row < this.ROWS; row++) {
       this.rowYCache.push(row * this.STEP);
@@ -1130,7 +1137,7 @@ class LineGrid {
     });
     for(let col=0;col<COLS;col++)
       for(let ri=0;ri<ROWS;ri++)
-        this.energy[col][ri]*=0.8;
+        this.energy[col][ri]*=this.HOVER_DECAY;
 
     // Background fill
     ctx.fillStyle=this.BG_COLOR; ctx.fillRect(0,0,W,H);
@@ -1138,27 +1145,54 @@ class LineGrid {
     const fracCol = this.smoothX>=0 ? this._getFracCol(this.smoothX) : -1;
     const fracRow = this.smoothY>=0 ? this.smoothY/STEP : -1;
 
-    // Background pixel grid
+    // Background pixel grid — with displacement field
+    // Pixels near the cursor/trail get pushed outward; they spring back when cursor leaves.
+    // dispX/dispY buffers store current displacement offset per cell (lerped toward target).
+    if (!this.dispX || this.dispX.length !== COLS) {
+      this.dispX = []; this.dispY = [];
+      for (let c = 0; c < COLS; c++) {
+        this.dispX.push(new Float32Array(ROWS));
+        this.dispY.push(new Float32Array(ROWS));
+      }
+    }
+
+    const DISP_MAX    = STEP * 2;
+    const DISP_RADIUS = STEP * 40;
+    const DISP_LERP   = 0.18;
+
+    const hasCursor = this.smoothX >= 0 && velStrength > 0.005;
+
     for(let col=0;col<COLS;col++){
-      const cellX=this.colXCache[col];
-      const xMul=(fracCol>=0&&velStrength>0.01)?Math.exp(-Math.pow(col-fracCol,2)*1.2)*velStrength:0;
+      const cellX = this.colXCache[col];
+      const baseCX = cellX + STEP / 2;
+
       for(let row=0;row<ROWS;row++){
-        const cellY=this.rowYCache[row];
-        const e=this.energy[col][row]||0;
-        ctx.fillStyle=`rgba(${this.LINE_COLOR},${this.BG_OPACITY})`;
-        this._drawPixelCentered(cellX,cellY,this.PIXEL_SIZE);
-        if(e>0.01){
-          ctx.fillStyle=`rgba(${this.LINE_COLOR},1)`;
-          const sz=this.HOVER_MIN+e*(this.HOVER_MAX-this.HOVER_MIN);
-          this._drawPixelCentered(cellX,cellY,sz);
-        } else if(xMul>0.02&&fracRow>=0){
-          const yDist=row-fracRow, yMul=Math.exp(-yDist*yDist*1.2), influence=xMul*yMul;
-          if(influence>0.02){
-            ctx.fillStyle=`rgba(${this.LINE_COLOR},1)`;
-            const sz=this.HOVER_MIN+influence*(this.HOVER_MAX-this.HOVER_MIN);
-            this._drawPixelCentered(cellX,cellY,sz);
+        const cellY = this.rowYCache[row];
+        const baseCY = cellY + STEP / 2;
+
+        let tdx = 0, tdy = 0;
+        if (hasCursor) {
+          const dx = baseCX - this.smoothX;
+          const dy = baseCY - this.smoothY;
+          const dist = Math.sqrt(dx*dx + dy*dy);
+          if (dist < DISP_RADIUS && dist > 0.1) {
+            const strength = Math.pow(1 - dist / DISP_RADIUS, 2) * velStrength * 1.5;
+            tdx = (dx / dist) * DISP_MAX * strength;
+            tdy = (dy / dist) * DISP_MAX * strength;
           }
         }
+
+        const cdx = this.dispX[col][row] + (tdx - this.dispX[col][row]) * DISP_LERP;
+        const cdy = this.dispY[col][row] + (tdy - this.dispY[col][row]) * DISP_LERP;
+        this.dispX[col][row] = cdx;
+        this.dispY[col][row] = cdy;
+
+        const drawX = cellX + cdx;
+        const drawY = cellY + cdy;
+
+        ctx.fillStyle = `rgba(${this.LINE_COLOR},${this.BG_OPACITY})`;
+        const half = this.PIXEL_SIZE / 2;
+        ctx.fillRect(drawX + STEP/2 - half, drawY + STEP/2 - half, this.PIXEL_SIZE, this.PIXEL_SIZE);
       }
     }
 
