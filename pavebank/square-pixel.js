@@ -716,7 +716,7 @@ class LineGrid {
       const pts = []; let anyVisible = false;
       for (let i = 0; i < ring.length; i++) {
         const [lon, lat] = ring[i];
-        const phi = (90 - lat) * Math.PI / 180, theta = lon * Math.PI / 180;
+        const phi = (90 - lat) * Math.PI / 180, theta = -lon * Math.PI / 180;
         let x = Math.sin(phi)*Math.cos(theta), y = Math.cos(phi), z = Math.sin(phi)*Math.sin(theta);
         const x1 = x*cosA + z*sinA, z1 = -x*sinA + z*cosA;
         const y2 = y*cosT - z1*sinT, z2 = y*sinT + z1*cosT;
@@ -774,7 +774,7 @@ class LineGrid {
     const SPREAD = 2;
 
     this.globeMarkers.forEach((m, i) => {
-      const phi = (90 - m.lat) * Math.PI / 180, theta = m.lon * Math.PI / 180;
+      const phi = (90 - m.lat) * Math.PI / 180, theta = -m.lon * Math.PI / 180;
       let x = Math.sin(phi)*Math.cos(theta), y = Math.cos(phi), z = Math.sin(phi)*Math.sin(theta);
       const x1 = x*cosA + z*sinA, z1 = -x*sinA + z*cosA;
       const y2 = y*cosT - z1*sinT, z2 = y*sinT + z1*cosT;
