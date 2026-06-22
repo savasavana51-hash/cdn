@@ -107,7 +107,7 @@ class LineGrid {
 
     // ── Two independent scrub-driven phases ─────────────────────────────────
     // PHASE 1 — outroProgress 0→1, GSAP scrub on .globe-outro (top 100% → 50%)
-    //   globe disintegrates: on-grid radial dissolve. Nothing else.
+    //   globe disintegrates: grid-quantized outward hop dissolve. Nothing else.
     // PHASE 2 — bankProgress 0→1, GSAP scrub on .pn-product-scroll.bankaccount
     //   (top 100% → 0%). Dollar reveals, then flips $ → € → ¥. All on scrub.
     this.outroProgress    = 0;
@@ -117,14 +117,17 @@ class LineGrid {
     this.bankProgress     = 0;    // 0→1 scrub: reveal + two flips, no ticker
     this.bankActive       = false;
 
-    // Disintegration tuning (radial dissolve, on-grid, no movement)
-    //   Cells dissolve in order of distance from globe centre (outer → ... )
+    // Disintegration tuning (radial dissolve, grid-quantized hop + fade)
+    //   Cells dissolve in order of radial distance from globe centre, then
+    //   hop OUTWARD cell-by-cell in whole STEP increments (always on-grid).
     //   DISSOLVE_DIR:  'out' = edges go first, 'in' = centre goes first
     //   DISSOLVE_JITTER: 0 = clean ring front, higher = more ragged edge
     //   DISSOLVE_BAND: width of the active dissolving front (0–1)
+    //   HOP_MAX: max grid cells a pixel travels before vanishing
     this.DISSOLVE_DIR    = options.dissolveDir    || 'out';
     this.DISSOLVE_JITTER = options.dissolveJitter !== undefined ? options.dissolveJitter : 0.18;
     this.DISSOLVE_BAND   = options.dissolveBand   !== undefined ? options.dissolveBand   : 0.25;
+    this.HOP_MAX         = options.hopMax !== undefined ? options.hopMax : 4;
 
     // Canvas
     this.canvas = document.createElement('canvas');
@@ -204,17 +207,22 @@ class LineGrid {
     this.energy    = [];
     this.fgActive  = [];
     this._cellJitter = [];
+    this._cellHopJit = [];
     for (let col = 0; col < this.COLS; col++) {
       this.colXCache.push(col * this.STEP);
       this.energy.push(new Float32Array(this.ROWS).fill(0));
       this.fgActive.push(new Float32Array(this.ROWS).fill(0));
       // Per-cell deterministic jitter (0–1) — ragged dissolve front
       const jit = new Float32Array(this.ROWS);
+      const hop = new Float32Array(this.ROWS);   // 0–1, randomizes hop count/dir
       for (let r = 0; r < this.ROWS; r++) {
         const h = Math.sin(col * 12.9898 + r * 78.233) * 43758.5453;
         jit[r] = h - Math.floor(h);
+        const h2 = Math.sin(col * 39.346 + r * 11.135) * 24634.6345;
+        hop[r] = h2 - Math.floor(h2);
       }
       this._cellJitter.push(jit);
+      this._cellHopJit.push(hop);
     }
     for (let row = 0; row < this.ROWS; row++) {
       this.rowYCache.push(row * this.STEP);
@@ -261,26 +269,24 @@ class LineGrid {
     }
   }
 
-  // Eased foreground render with optional on-grid radial dissolve.
-  // disint 0 = intact; 1 = fully dissolved. Cells never leave their grid cell —
-  // they shrink to zero in order of radial distance from the globe centre,
-  // with per-cell jitter for a ragged front. (A+C disintegration.)
+  // Eased foreground render with optional grid-quantized hop dissolve (B+C).
+  // disint 0 = intact; 1 = fully dissolved. As the radial front (ordered by
+  // distance from globe centre) reaches a cell, the pixel hops OUTWARD in whole
+  // STEP increments — landing on a real grid node every frame — and fades as it
+  // travels, vanishing after HOP_MAX cells. Scrub-driven and reversible.
   _drawFgEased(disint = 0) {
-    const { COLS, ROWS, FG_MIN, FG_MAX } = this;
+    const { COLS, ROWS, FG_MIN, FG_MAX, STEP } = this;
     const doDissolve = disint > 0.0001;
 
-    // Radial reference: globe centre + radius (fall back to canvas centre)
     const gcx = this._globeCX || this.W / 2;
     const gcy = this._globeCY || this.H / 2;
     const gr  = this._globeR  || Math.min(this.W, this.H) * 0.5;
-    const invR = 1 / (gr * 1.05);            // normalise so edge ≈ 1
+    const invR = 1 / (gr * 1.05);
     const dirOut = this.DISSOLVE_DIR !== 'in';
     const band   = Math.max(0.02, this.DISSOLVE_BAND);
     const jitAmt = this.DISSOLVE_JITTER;
-
-    // Front position 0→1 across the whole dissolve, expanded so the band
-    // fully clears both ends (front travels from -band to 1+jit).
-    const front = disint * (1 + band + jitAmt);
+    const hopMax = this.HOP_MAX;
+    const front  = disint * (1 + band + jitAmt);
 
     this.ctx.fillStyle = `rgba(${this.LINE_COLOR},1)`;
 
@@ -289,7 +295,8 @@ class LineGrid {
       const targetCol = this._fgTarget[col];
       const activeCol = this.fgActive[col];
       const jitCol    = this._cellJitter[col];
-      const cxCell    = cellX + this.STEP / 2;
+      const hopCol    = this._cellHopJit[col];
+      const cxCell    = cellX + STEP / 2;
       for (let row = 0; row < ROWS; row++) {
         const target = targetCol[row];
         const cur    = activeCol[row];
@@ -297,28 +304,56 @@ class LineGrid {
         activeCol[row] = next;
         if (next <= 0.001) continue;
 
-        let vis = 1;
-        if (doDissolve) {
-          const cyCell = this.rowYCache[row] + this.STEP / 2;
-          const dx = (cxCell - gcx) * invR, dy = (cyCell - gcy) * invR;
-          let nd = Math.sqrt(dx*dx + dy*dy);           // 0 centre → ~1 edge
-          if (dirOut) nd = 1 - nd;                     // edges dissolve first
-          // Per-cell threshold with jitter
-          const thresh = nd + (jitCol[row] - 0.5) * jitAmt;
-          // vis: 1 before front, 0 after, linear across the band
-          vis = (thresh - (front - band)) / band;
-          if (vis >= 1) vis = 1;
-          else if (vis <= 0) continue;                 // fully dissolved cell
+        const baseSz = FG_MIN + next * (FG_MAX - FG_MIN);
+
+        if (!doDissolve) {
+          this.ctx.fillStyle = `rgba(${this.LINE_COLOR},1)`;
+          this._drawPixelCentered(cellX, this.rowYCache[row], baseSz);
+          continue;
         }
 
-        const sz = (FG_MIN + next * (FG_MAX - FG_MIN)) * vis;
-        if (sz <= 0.001) continue;
-        if (doDissolve && vis < 1) {
-          this.ctx.fillStyle = `rgba(${this.LINE_COLOR},${vis})`;
-        } else {
+        // Radial position of source cell
+        const cyCell = this.rowYCache[row] + STEP / 2;
+        const ndx = (cxCell - gcx) * invR, ndy = (cyCell - gcy) * invR;
+        let nd = Math.sqrt(ndx*ndx + ndy*ndy);
+        let rnd = dirOut ? 1 - nd : nd;
+        const thresh = rnd + (jitCol[row] - 0.5) * jitAmt;
+
+        // local 0→1 = how far this cell is into its own dissolve
+        const local = (front - band - thresh) / band;   // <0 not started, >1 done-ish
+        if (local <= 0) {
+          // not yet dissolving — render in place, full
           this.ctx.fillStyle = `rgba(${this.LINE_COLOR},1)`;
+          this._drawPixelCentered(cellX, this.rowYCache[row], baseSz);
+          continue;
         }
-        this._drawPixelCentered(cellX, this.rowYCache[row], sz);
+
+        // Hop count grows with local progress, quantized to whole cells
+        const lp = Math.min(1, local);
+        const cellMaxHops = 1 + Math.floor(hopCol[row] * hopMax);   // 1..hopMax+1
+        const hops = Math.floor(lp * cellMaxHops + 0.0001);
+        const fade = 1 - lp;                                        // fade as it travels
+        if (fade <= 0.01) continue;                                 // fully gone
+
+        // Outward grid direction (unit-ish radial → quantized to a grid step)
+        let ux = cxCell - gcx, uy = cyCell - gcy;
+        const ul = Math.hypot(ux, uy) || 1;
+        ux /= ul; uy /= ul;
+        // Diagonal vs orthogonal: snap each axis to -1/0/1 by magnitude
+        const ax = Math.abs(ux), ay = Math.abs(uy);
+        let dcol = 0, drow = 0;
+        if (ax > 0.38) dcol = ux > 0 ? 1 : -1;
+        if (ay > 0.38) drow = uy > 0 ? 1 : -1;
+        if (dcol === 0 && drow === 0) { dcol = ux >= 0 ? 1 : -1; }
+
+        const hCol = col + dcol * hops;
+        const hRow = row + drow * hops;
+        if (hCol < 0 || hCol >= COLS || hRow < 0 || hRow >= ROWS) continue;
+
+        const sz = baseSz * (0.6 + fade * 0.4);   // slight shrink while fading
+        if (sz <= 0.001) continue;
+        this.ctx.fillStyle = `rgba(${this.LINE_COLOR},${fade})`;
+        this._drawPixelCentered(this.colXCache[hCol], this.rowYCache[hRow], sz);
       }
     }
   }
