@@ -12,7 +12,7 @@ if (window.innerWidth >= 992) {
 
   const dimensions = {
     products: { widthVw: 57, widthPx: 820 },
-    solutions: { widthVw: 23, widthPx: 330 },
+    solutions: { widthVw: 23, widthPx: 600 },
     developers: { widthVw: 20, widthPx: 288 },
     company: { widthVw: 20, widthPx: 288 },
     "use-company": { widthVw: 20, widthPx: 288 },
