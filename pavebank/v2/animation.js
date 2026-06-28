@@ -74,6 +74,25 @@ window.addEventListener('load', () => {
     onLeave:     () => { grid1.GLOBE_SPEED = BASE_SPEED; },
     onLeaveBack: () => { grid1.GLOBE_SPEED = BASE_SPEED; },
   });
+  
+  
+  // ── Hero content exit ──────────────────────────────────────────────────────
+  // Slide .pn-hero-content down as the hero scrolls away.
+
+  if (document.querySelector('.pn-hero-content')) {
+    gsap.timeline({
+      scrollTrigger: {
+        trigger: '.pn-hero',
+        start:   'bottom 100%',
+        end:     'bottom 0%',
+        scrub:   true,
+      }
+    })
+    .to('.pn-hero-content', {
+      y:    '20vh',
+      ease: 'none',
+    });
+  }
 
   // ── Phase 1: Globe outro — disintegration ─────────────────────────────────
   // Trigger: top of .globe-outro hits 100% viewport → 50% viewport
@@ -92,52 +111,287 @@ window.addEventListener('load', () => {
     onLeaveBack: () => { grid1.outroProgress = 0; },
   });
 
-  // ── Phase 2: Bank accounts — dollar reveal + currency flips ────────────────
-  // Trigger: top of .pn-product-scroll.bankaccount hits 100% → 0% viewport
-  // Effect (scrubbed via grid1.bankProgress 0→1):
-  //   reveal $ → hold → flip $→€ → hold → flip €→¥
-  // Entirely scrub-driven, no ticker. Reverses on scroll-up.
+  // ── Product graphic sequence factory ──────────────────────────────────────
+  // Reusable for every .pn-product-scroll graphic. The canvas renders a shared
+  // state object; here we own the scroll choreography. Three fixed anchors:
+  //
+  //   REVEAL : top+=revealStartVh bottom → top+=revealEndVh bottom   (fixed vh)
+  //   MIDDLE : everything between reveal-end and exit-start           (stretches)
+  //   EXIT   : bottom-=exitStartVh bottom → bottom-=exitEndVh bottom  (fixed vh)
+  //
+  // Reveal & exit are always the same physical scroll distance (vh-anchored).
+  // In the MIDDLE, holds are a FIXED vh each; the flips stretch to fill whatever
+  // space is left. So to slow/speed the flips, just change the section's height.
+  //
+  // config = {
+  //   trigger,                       // selector / element
+  //   state,                         // object the canvas renders
+  //   revealStartVh, revealEndVh,    // reveal window (vh of scroll)
+  //   exitStartVh,   exitEndVh,      // exit window   (vh of scroll, from bottom)
+  //   holdVh,                        // hold length between middle steps (fixed vh)
+  //   revealEase, exitEase,          // GSAP ease names for reveal/exit (optional)
+  //   onReveal(state, p),            // 0→1 scrub for reveal (p already eased)
+  //   onExit(state, p),              // 0→1 scrub for exit   (p already eased)
+  //   steps: [ fn(state, tl, holdDur, flipDur), ... ]  // middle builders
+  // }
+  function buildProductSequence(cfg) {
+    const vh = (f) => window.innerHeight * f;
+    // Pre-parse eases once; default to linear if omitted.
+    const revealEase = gsap.parseEase(cfg.revealEase || 'none');
+    const exitEase   = gsap.parseEase(cfg.exitEase   || 'none');
 
-  ScrollTrigger.create({
+    // REVEAL — fixed vh window
+    ScrollTrigger.create({
+      trigger: cfg.trigger,
+      start: () => `top+=${vh(cfg.revealStartVh)} bottom`,
+      end:   () => `top+=${vh(cfg.revealEndVh)} bottom`,
+      scrub: true,
+      onUpdate: (self) => cfg.onReveal(cfg.state, revealEase(self.progress)),
+    });
+
+    // EXIT — fixed vh window (anchored to the section bottom)
+    ScrollTrigger.create({
+      trigger: cfg.trigger,
+      start: () => `bottom-=${vh(cfg.exitStartVh)} bottom`,
+      end:   () => `bottom-=${vh(cfg.exitEndVh)} bottom`,
+      scrub: true,
+      onUpdate: (self) => cfg.onExit(cfg.state, exitEase(self.progress)),
+    });
+
+    // MIDDLE — spans from reveal-end anchor down to exit-start anchor.
+    // Holds are fixed vh; flips stretch to fill the rest. We build the timeline
+    // with durations as fractions of the middle span, recomputed on refresh.
+    const steps = cfg.steps || [];
+    if (steps.length) {
+      const midTL = gsap.timeline({
+        defaults: { ease: 'none' },
+        scrollTrigger: {
+          trigger: cfg.trigger,
+          // middle window: top+=revealEndVh  →  bottom-=exitStartVh
+          start: () => `top+=${vh(cfg.revealEndVh)} bottom`,
+          end:   () => `bottom-=${vh(cfg.exitStartVh)} bottom`,
+          scrub: true,
+        },
+      });
+
+      // Compute durations from the live middle span so holds stay a fixed vh.
+      // middleSpanPx = (section bottom - exitStartVh) - (section top + revealEndVh)
+      const buildSteps = () => {
+        const el = typeof cfg.trigger === 'string'
+          ? document.querySelector(cfg.trigger) : cfg.trigger;
+        const h = el ? el.offsetHeight : window.innerHeight;
+        const midSpanPx = (h - vh(cfg.exitStartVh)) - (vh(cfg.revealEndVh));
+        const span = Math.max(1, midSpanPx);
+
+        // Fixed-vh hold as a fraction of the middle span.
+        const holdFrac = vh(cfg.holdVh) / span;
+        // There's one hold before each step. Remaining time splits across flips.
+        const nFlips = steps.length;
+        const totalHold = holdFrac * nFlips;
+        const flipFrac = Math.max(0.0001, (1 - totalHold) / nFlips);
+
+        midTL.clear();
+        steps.forEach((stepFn) => {
+          stepFn(cfg.state, midTL, holdFrac, flipFrac);
+        });
+      };
+
+      buildSteps();
+      // Recompute on refresh (resize / layout change) so holds stay fixed vh.
+      ScrollTrigger.addEventListener('refreshInit', buildSteps);
+    }
+  }
+
+  // ── Bank accounts — 3D currency sequence ($ → € → ¥) ───────────────────────
+  const C  = ['$', '\u20AC', '\u00A5'];   // Dollar, Euro, Yen
+  const cs = grid1.curState;              // the object the canvas renders
+
+  // One flip step: proxy a 0→1 → 0→π rotation; symbol swaps at the 90° slab.
+  // `holdDur` is prepended as a delay so each flip waits a fixed hold first.
+  function flipStep(from, to) {
+    return (state, tl, holdDur, flipDur) => {
+      const proxy = { a: 0 };
+      tl.to(proxy, {
+        a: 1, duration: flipDur, ease: 'power2.inOut', delay: holdDur,
+        onUpdate() {
+          const local = proxy.a * Math.PI;
+          state.symbol    = proxy.a < 0.5 ? from : to;
+          state.flipAngle = -(local < Math.PI/2 ? local : local - Math.PI);
+        },
+      });
+    };
+  }
+
+  buildProductSequence({
     trigger: '.pn-product-scroll.bankaccount',
-    start:   'top 100%',
-    end:     'top 0%',
-    scrub:   true,
-    onUpdate: (self) => {
-      grid1.bankProgress = self.progress;
+    state:   cs,
+    revealStartVh: 0.0,
+    revealEndVh:   0.30,
+    exitStartVh:   0.30,
+    exitEndVh:     0.0,
+    holdVh:        0.10,
+    revealEase: 'circ.out',
+    exitEase:   'none',
+    onReveal: (s, p) => {
+      // p is already eased by the factory
+      s.symbol   = C[0];
+      s.scale    = p;
+      s.dissolve = 0;
     },
-    onLeave:     () => { grid1.bankProgress = 1; },
-    onLeaveBack: () => { grid1.bankProgress = 0; },
+    onExit: (s, p) => {
+      s.dissolve = p;     // p already eased
+    },
+    steps: [
+      flipStep(C[0], C[1]),   // $ → €
+      flipStep(C[1], C[2]),   // € → ¥
+    ],
   });
 
-  // ── Phase 2 (content): product content fade-in from bottom ─────────────────
-  // Plays alongside the dollar growing. Subtle rise + fade, scrubbed.
-  // Adjust start/end offsets to taste.
+  // ── Digital Asset Management — isometric cube (.pn-product-scroll.dam) ──────
+  // reveal (6 minis scale up) → merge (fly in, centre cube grows) → spin ×2 →
+  // dissolve. Drives grid1.damState; the canvas renders it. Same factory, same
+  // fixed-vh reveal/exit + stretchy middle as bank accounts.
+  const damState = grid1.damState;
 
-  const baContent = document.querySelector('.product-content._1');
+  // Middle step builders — each gets (state, tl, holdDur, flipDur).
+  const mergeStep = (state, tl, holdDur, flipDur) =>
+    tl.to(state, { merge: 1, duration: flipDur, ease: 'power2.inOut', delay: holdDur });
+  // A single 90° spin; `target` is the absolute rotation in radians.
+  const spinStep = (target) => (state, tl, holdDur, flipDur) =>
+    tl.to(state, { rot: target, duration: flipDur, ease: 'power2.inOut', delay: holdDur });
 
-  if (baContent) {
-    gsap.set(baContent, { opacity: 0, y: '0.2rem' });
+  buildProductSequence({
+    trigger: '.pn-product-scroll.dam',
+    state:   damState,
+    revealStartVh: 0.0,
+    revealEndVh:   0.30,
+    exitStartVh:   0.30,
+    exitEndVh:     0.0,
+    holdVh:        0.10,
+    revealEase: 'power3.out',
+    exitEase:   'none',
+    onReveal: (s, p) => {
+      s.reveal   = p;     // 6 minis scale up (staggered inside the canvas)
+      s.merge    = 0;
+      s.dissolve = 0;
+    },
+    onExit: (s, p) => {
+      s.dissolve = p;     // grid-quantized hop dissolve
+    },
+    steps: [
+      mergeStep,                 // minis fly in, centre cube accumulates
+      spinStep(-Math.PI/2),      // rotate 1
+      spinStep(-Math.PI),        // rotate 2
+    ],
+  });
 
-    gsap.timeline({
-      scrollTrigger: {
-        trigger: '.pn-product-scroll.bankaccount',
-        start:   'top 80%',   // ← change offset here
-        end:     'top 55%',    // ← and here (window for the fade)
-        scrub:   true,
-      }
-    })
-    .to(baContent, {
-      opacity: 1,
-      y:       '0rem',
-      ease:    'none',
-    }, 0);
-  }
+  // ── PaveNet — concentric rings (.pn-product-scroll.pnet) ───────────────────
+  // reveal (4 rings scale up, staggered) → spin Y 360° (staggered) → spin X 360°
+  // (staggered) → dissolve. Rings are static between phases (aligned holds).
+  // Drives grid1.pnetState; the canvas renders it. Same factory as the others.
+  const pnetState = grid1.pnetState;
+
+  // Each 360° rotation step drives a state field 0→1; the canvas maps that to a
+  // full turn per ring with its own stagger. Hold precedes each via holdDur.
+  const ringSpin = (field) => (state, tl, holdDur, flipDur) =>
+    tl.to(state, { [field]: 1, duration: flipDur, ease: 'power2.inOut', delay: holdDur });
+
+  buildProductSequence({
+    trigger: '.pn-product-scroll.pnet',
+    state:   pnetState,
+    revealStartVh: 0.0,
+    revealEndVh:   0.30,
+    exitStartVh:   0.30,
+    exitEndVh:     0.0,
+    holdVh:        0.10,
+    revealEase: 'circ.out',
+    exitEase:   'none',
+    onReveal: (s, p) => {
+      s.reveal   = p;     // rings scale up (staggered inside the canvas)
+      s.spinY    = 0;
+      s.spinX    = 0;
+      s.dissolve = 0;
+    },
+    onExit: (s, p) => {
+      s.dissolve = p;     // grid-quantized hop dissolve
+    },
+    steps: [
+      ringSpin('spinY'),   // 360° about vertical axis (staggered)
+      ringSpin('spinX'),   // 360° about horizontal axis (staggered)
+    ],
+  });
+
+  // ── Trading & Markets — scrolling market chart (.pn-product-scroll.trade) ───
+  // reveal (3 bars rise, staggered) → scroll (strip slides right→left through the
+  // chart, then the tail exits left → empty canvas). No separate dissolve: the
+  // scroll-off IS the exit, so the middle step carries scroll 0→1 to completion.
+  // Drives grid1.tradeState; the canvas renders it.
+  const tradeState = grid1.tradeState;
+
+  const scrollStep = (state, tl, holdDur, flipDur) =>
+    tl.to(state, { scroll: 1, duration: flipDur, ease: 'none', delay: holdDur });
+
+  buildProductSequence({
+    trigger: '.pn-product-scroll.trade',
+    state:   tradeState,
+    revealStartVh: 0.0,
+    revealEndVh:   0.30,
+    exitStartVh:   0.0,        // no separate exit — the scroll carries it off
+    exitEndVh:     0.0,
+    holdVh:        0.10,
+    revealEase: 'power3.out',
+    onReveal: (s, p) => {
+      s.reveal = p;            // 3 bars rise (staggered inside the canvas)
+      s.scroll = 0;
+    },
+    onExit: () => {},          // unused
+    steps: [
+      scrollStep,              // strip scrolls through the chart and off the left
+    ],
+  });
+
+  // ── Treasury Management — segmented ring (.pn-product-scroll.treasury) ──────
+  // reveal (slices scale in, staggered anti-cw) → middle (flip wave through the
+  // slices WHILE the ring spins 180°, in parallel) → exit (slices scale out).
+  // Drives grid1.treasuryState; the canvas renders it.
+  const treasuryState = grid1.treasuryState;
+
+  // One middle step that drives flip + spin together (parallel, same duration).
+  const treMiddleStep = (state, tl, holdDur, flipDur) => {
+    const lbl = 'treMid' + tl.totalDuration();
+    tl.addLabel(lbl, `+=${holdDur}`);
+    tl.to(state, { flip: 1, duration: flipDur, ease: 'none' }, lbl);
+    tl.to(state, { spin: 1, duration: flipDur, ease: 'power1.inOut' }, lbl);
+  };
+
+  buildProductSequence({
+    trigger: '.pn-product-scroll.treasury',
+    state:   treasuryState,
+    revealStartVh: 0.0,
+    revealEndVh:   0.30,
+    exitStartVh:   0.30,
+    exitEndVh:     0.0,
+    holdVh:        0.10,
+    revealEase: 'power2.out',
+    exitEase:   'power2.in',
+    onReveal: (s, p) => {
+      s.reveal = p;            // slices scale in (staggered inside the canvas)
+      s.flip   = 0;
+      s.spin   = 0;
+      s.exit   = 0;
+    },
+    onExit: (s, p) => {
+      s.exit = p;              // slices scale out (staggered)
+    },
+    steps: [
+      treMiddleStep,           // flip wave + ring spin (parallel)
+    ],
+  });
 
   // ── Product scroller — heading words + nav items ──────────────────────────
 
   const heading2 = document.querySelector('.pn-heading-2');
-  const navItems = gsap.utils.toArray('.pn-nav-wrapper .pn-product-nav');
+  const navItems = gsap.utils.toArray('.pn-nav-wrapper .pn-product-nav-text');
   const graphicDot = gsap.utils.toArray('.pn-graphics .pn-graphics-dot');
 
   if (heading2) {
@@ -148,7 +402,7 @@ window.addEventListener('load', () => {
 
     const tl = gsap.timeline({
       scrollTrigger: {
-        trigger: '.pn-product-scroller',
+        trigger: '.product-intro',
         start:   'top bottom',
         end:     'top 50%',
         scrub:   true,
@@ -164,7 +418,7 @@ window.addEventListener('load', () => {
       opacity: 1,
       y:       '0%',
       stagger: 0.2,
-      ease:    'none',
+      ease:    'circ.out',
     }, "<")
     .to(navItems, {
       opacity: 1,
@@ -179,27 +433,116 @@ window.addEventListener('load', () => {
   // When a section is the one in view, its nav wrapper gets .active (others lose it).
 
   const productScrolls = gsap.utils.toArray('.pn-product-scroll');
-  const navWrappers    = gsap.utils.toArray('.pn-product-nav-wrapper');
+  const navWrappers    = gsap.utils.toArray('.pn-product-nav');
+  const productContents = gsap.utils.toArray('.product-content');
+  const navDot         = document.querySelector('.pn-product-nav-dot');
+  let   activeNavIndex = 0;
+  let   dotIntroDone   = false;   // dot scales in on its first appearance
 
-  function setActiveNav(index) {
-    navWrappers.forEach((nav, i) => {
-      nav.classList.toggle('active', i === index);
-    });
+  // All product content starts hidden (they render visible in the DOM on load).
+  gsap.set(productContents, { y: '0.6rem', opacity: 0 });
+
+  // Dot starts hidden (scaled out) — it scales in the first time a nav activates.
+  if (navDot) gsap.set(navDot, { scale: 0 });
+
+  // Move the green dot to sit centred under the active nav item.
+  // Items have variable widths, so we measure live positions each time.
+  function moveDotTo(index, animateScale = false) {
+    if (!navDot || !navWrappers[index]) return;
+    const item   = navWrappers[index];
+    const itemCenter = item.offsetLeft + item.offsetWidth / 2;   // centre relative to wrapper
+    const x = itemCenter - navDot.offsetWidth / 2;               // align dot's own centre
+
+    if (animateScale && !dotIntroDone) {
+      // First appearance — snap to position, then scale 0 → 1 (seamless intro)
+      dotIntroDone = true;
+      gsap.set(navDot, { x });
+      gsap.to(navDot, { scale: 1, duration: 0.45, ease: 'back.out(2)' });
+    } else {
+      gsap.to(navDot, { x, duration: 0.8, ease: 'expo.out' });
+    }
+  }
+
+  // Clear nav active classes everywhere (used on enter before re-activating one).
+  function clearAllActive() {
+    navWrappers.forEach(n => n.classList.remove('active'));
+  }
+
+  // Activate a section's nav + move the dot. Plain function (no timeline
+  // callbacks) so it fires identically on enter and enterBack — reliable reverse.
+  function activateSection(index) {
+    clearAllActive();
+    activeNavIndex = index;
+    if (navWrappers[index]) navWrappers[index].classList.add('active');
+    moveDotTo(index, true);
   }
 
   productScrolls.forEach((section, i) => {
     ScrollTrigger.create({
       trigger: section,
-      start:   'top bottom',
-      end:     'bottom bottom',
-      onEnter:     () => setActiveNav(i),
-      onEnterBack: () => setActiveNav(i),
+      start:   '0% bottom',
+      end:     '100% bottom',
+      onEnter:     () => activateSection(i),
+      onEnterBack: () => activateSection(i),
       onLeaveBack: () => {
-        // Scrolled back up above this section — clear its active state.
+        // Scrolled back up above this section — remove its active class.
         if (navWrappers[i]) navWrappers[i].classList.remove('active');
+        // First item leaving back → scale the dot away and allow re-intro.
+        if (i === 0 && navDot) {
+          dotIntroDone = false;
+          gsap.to(navDot, { scale: 0, duration: 0.8, ease: 'expo.out' });
+        }
       },
+     
     });
   });
+
+  // ── Product content reveal + exit — two scrubbed triggers per section ──────
+  // ENTER: y 0.6rem / opacity 0 → y 0 / opacity 1
+  //        starts when 10% of the section has passed the viewport bottom,
+  //        ends at 30%.
+  // EXIT:  y 0 / opacity 1 → y -0.6rem / opacity 0
+  //        starts at 80% of the section past bottom, ends at 100%.
+  // "X% past bottom" = the point X% down the section's own height crossing
+  // the viewport bottom → ScrollTrigger 'top bottom-=X%'.
+
+  productScrolls.forEach((section, i) => {
+    const content = productContents[i];
+    if (!content) return;
+
+    // Enter — fromTo owns the initial hidden state (immediateRender on load)
+    gsap.fromTo(content,
+      { y: '0.6rem', opacity: 0, zIndex: -1},
+      {
+        y: '0rem', opacity: 1, zIndex: 9, ease: 'circ.out',
+        immediateRender: true,   // apply the `from` state on load
+        scrollTrigger: {
+          trigger: section,
+          start: () => `top+=${window.innerHeight * 0.20} bottom`,
+          end:   () => `top+=${window.innerHeight * 0.40} bottom`,
+          scrub: true
+        },
+      }
+    );
+
+    // Exit — plain .to from the live state; immediateRender off so it doesn't
+    // stamp a visible state on load and override the enter's hidden start.
+    gsap.to(content,
+      {
+        y: '-0.6rem', opacity: 0, zIndex: -1, ease: 'circ.in', 
+        immediateRender: false,
+        scrollTrigger: {
+          trigger: section,
+          start: () => `bottom-=${window.innerHeight * 0.30} bottom`,
+          end: () => `bottom-=${window.innerHeight * 0.10} bottom`,
+          scrub: true
+        },
+      }
+    );
+  });
+
+  // Item widths change on resize — reposition the dot under the active item.
+  window.addEventListener('resize', () => moveDotTo(activeNavIndex));
 
   // ── Scroll progress tracker ───────────────────────────────────────────────
 
@@ -215,5 +558,21 @@ window.addEventListener('load', () => {
       document.querySelector('.scroll-percentage').textContent = Math.round(p * 100) + '%';
     },
   });
+
+  // ── Nav hide on scroll-down, show on scroll-up ─────────────────────────────
+  /*
+  const pnNav = document.querySelector('.pn-nav');
+
+  if (pnNav) {
+    ScrollTrigger.create({
+      start: 0,
+      end:   'max',
+      onUpdate: (self) => {
+        // direction: 1 = scrolling down, -1 = scrolling up
+        if (self.direction === 1) pnNav.classList.add('hide');
+        else                      pnNav.classList.remove('hide');
+      },
+    });
+  } */
 
 });
