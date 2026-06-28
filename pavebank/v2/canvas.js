@@ -5,10 +5,10 @@
 // =========================================================================
 
 const LINEGRID_DEFAULTS = {
-  pixelRem:    0.025,
-  stepRem:     0.2,
+  pixelRem:    0.024,
+  stepRem:     0.14,
   fgMinRem:    0.02,
-  fgMaxRem:    0.14,
+  fgMaxRem:    0.1,
   fgEase:      1,
   bgOpacity:   0.35,
   hoverMinRem: 0.03,
@@ -25,6 +25,29 @@ const LINEGRID_DEFAULTS = {
   lineColor:   '#f5f5f5',
   dpr:         Math.min(window.devicePixelRatio || 1, 2),
 };
+
+// ── Isometric cube geometry (Digital Asset Management) ──────────────────────
+// 45° about Y + ~35.26° tilt about X = classic 3/4 isometric. Canvas y grows
+// down, so the tilt is signed to look DOWN at the cube (top face visible).
+const ISO_A      = Math.atan(1 / Math.SQRT2);   // ~35.264° X tilt
+const ISO_BASE_Y = Math.PI / 4;                 // 45° base Y rotation
+// Vertical screen extent of a unit (half-size 1) cube at the base view, so a
+// rem size maps to real on-screen cube height.
+const ISO_SPAN = (() => {
+  const ct = Math.cos(ISO_A), st = Math.sin(ISO_A);
+  const c  = Math.cos(ISO_BASE_Y), s = Math.sin(ISO_BASE_Y);
+  let minY = Infinity, maxY = -Infinity;
+  for (const p of [
+    [-1,-1,-1],[1,-1,-1],[1,-1,1],[-1,-1,1],
+    [-1,1,-1],[1,1,-1],[1,1,1],[-1,1,1],
+  ]) {
+    const zr = -p[0]*s + p[2]*c;
+    const y2 = p[1]*ct + zr*st;
+    if (y2 < minY) minY = y2;
+    if (y2 > maxY) maxY = y2;
+  }
+  return maxY - minY;
+})();
 
 class LineGrid {
   constructor(container, options = {}) {
@@ -89,7 +112,16 @@ class LineGrid {
     this.GLOBE_TILT     = options.globeTilt  !== undefined ? options.globeTilt  : -0.3;
     this.GLOBE_SPEED    = options.globeSpeed  || 0.005;
     this.globeRevealScale     = 1;
-    this.globeScrollProgress  = 0;  // 0 = cropped at bottom, 1 = centred + shrunk
+    this.globeScrollProgress  = 0;  // 0 = cropped at bottom, 1 = end position
+
+    // ── Globe scroll-end tuning ─────────────────────────────────────────────
+    // GLOBE_END_VH:  end vertical position as a fraction of viewport height,
+    //                measured from canvas centre. 0 = stays centred, -1 = moves
+    //                up by 100vh (off the top), 0.5 = down half a screen, etc.
+    // GLOBE_END_R_REM: globe radius (rem) at full scroll. Lower = shrinks more.
+    //                Set equal to the full radius (~10.7) for no scale-down.
+    this.GLOBE_END_VH    = options.globeEndVh    !== undefined ? options.globeEndVh    : 0;   // -100vh
+    this.GLOBE_END_R_REM = options.globeEndRRem  !== undefined ? options.globeEndRRem  : 4;    // shrink target
 
     this.GLOBE_MARKER_COLOR = this._hexToRgb(options.markerColor || '#77DD84');
     this.globeMarkers = options.globeMarkers || [
@@ -114,8 +146,155 @@ class LineGrid {
     this._disintegrate    = 0;    // 0 = intact, 1 = fully dissolved
     this._cellJitter      = [];   // per-cell random jitter for dissolve threshold
 
-    this.bankProgress     = 0;    // 0→1 scrub: reveal + two flips, no ticker
+    this.bankProgress     = 0;    // 0→1 scrub from .pn-product-scroll.bankaccount
     this.bankActive       = false;
+    this.damActive        = false;
+
+    // ── 3D extruded currency sequence (GSAP timeline, scrubbed by bankProgress)
+    //   reveal $ → hold → flip $→€ → hold → flip €→¥ → hold → dissolve out.
+    //   Faces render solid, side walls render smaller & lighter (depth).
+    this.CUR_GLYPH_FRAC  = options.curGlyphFrac  !== undefined ? options.curGlyphFrac  : 0.32;
+    this.CUR_DEPTH       = options.curDepth      !== undefined ? options.curDepth      : 0.20;
+    this.CUR_FOCAL       = options.curFocal      !== undefined ? options.curFocal      : 2.8;
+    this.CUR_FACE_SHADE  = 1.0;
+    this.CUR_WALL_SHADE  = 0.5;
+    this.CUR_WALL_SIZE   = options.curWallSize   !== undefined ? options.curWallSize   : 0.7;  // wall px ÷ face px
+    // dissolve (grid-quantized hop) tuning for the currency exit
+    this.CUR_HOP_MAX     = options.curHopMax     !== undefined ? options.curHopMax     : 4;
+    this.CUR_DIS_BAND    = options.curDisBand    !== undefined ? options.curDisBand    : 0.25;
+    this.CUR_DIS_JITTER  = options.curDisJitter  !== undefined ? options.curDisJitter  : 0.18;
+    this._curMasks       = null;  // built lazily
+    // Public tweenable state — animations.js builds the GSAP timeline against
+    // this object and scrubs it. The canvas just renders whatever it holds.
+    this.curState        = { scale: 0, flipAngle: 0, symbol: '$', dissolve: 0 };
+    this._curState       = this.curState;   // internal alias
+
+    // ── Digital Asset Management — isometric cube (6 minis → merge → spin → out)
+    //   Public state driven by a GSAP timeline in animations.js, scrubbed on
+    //   .pn-product-scroll.dam. reveal → merge → rot ×2 → dissolve.
+    this.damState        = { reveal: 0, merge: 0, rot: 0, dissolve: 0 };
+    this.DAM_CUBE_REM    = options.damCubeRem   !== undefined ? options.damCubeRem   : 5;    // big cube size
+    this.DAM_MINI_REM    = options.damMiniRem   !== undefined ? options.damMiniRem   : 2;    // mini cube size
+    this.DAM_SHADE_TOP   = options.damShadeTop  !== undefined ? options.damShadeTop  : 0.55;
+    this.DAM_SHADE_LEFT  = options.damShadeLeft !== undefined ? options.damShadeLeft : 0.35;
+    this.DAM_SHADE_RIGHT = options.damShadeRight!== undefined ? options.damShadeRight: 1.0;
+    this.DAM_LIGHT_SIZE  = options.damLightSize !== undefined ? options.damLightSize : 0.7;  // lighter faces draw smaller
+    this.DAM_REVEAL_OVL  = options.damRevealOvl !== undefined ? options.damRevealOvl : 0.5;  // reveal stagger overlap
+    this.DAM_MERGE_OVL   = options.damMergeOvl  !== undefined ? options.damMergeOvl  : 0.45; // merge stagger overlap
+    this.DAM_HOP_MAX     = options.damHopMax    !== undefined ? options.damHopMax    : 4;
+    this.DAM_DIS_BAND    = options.damDisBand   !== undefined ? options.damDisBand   : 0.25;
+    this.DAM_DIS_JITTER  = options.damDisJitter !== undefined ? options.damDisJitter : 0.18;
+    // 6 mini-cube ring slots on a regular hexagon (even 60° spacing), ordered
+    // clockwise from TOP-RIGHT → ... → TOP-LEFT. Angles measured from +x axis,
+    // going clockwise (screen y is down). Radius set by RX/RY (ellipse so the
+    // ring reads evenly under the isometric foreshortening).
+    {
+      const RX = 1.84, RY = 1.84;            // ring radii (× cube scale)
+      // clockwise screen angles: top-right 60°, mid-right 0°, bottom-right -60°,
+      // bottom-left -120°, mid-left 180°, top-left 120°
+      const angs = [60, 0, -60, -120, 180, 120].map(d => d * Math.PI/180);
+      this.DAM_SCATTER = angs.map(a => ({
+        dx:  Math.cos(a) * RX,
+        dy: -Math.sin(a) * RY,            // negate: screen y grows down
+      }));
+    }
+
+    // ── PaveNet — concentric extruded rings (reveal → spinY 360 → spinX 360 → out)
+    //   Disk cut into N nested annular rings; reveal scales them up, then two
+    //   full 360° rotations (Y then X), each staggered across rings (outer leads,
+    //   inner trails), returning to aligned; then grid-quantized hop dissolve.
+    //   Public state driven by a GSAP timeline in animations.js (.pn-product-scroll.pnet).
+    this.pnetState        = { reveal: 0, spinY: 0, spinX: 0, dissolve: 0 };
+    this.PNET_DISK_REM    = options.pnetDiskRem  !== undefined ? options.pnetDiskRem  : 6.9;  // disk diameter
+    this.PNET_THICK_REM   = options.pnetThickRem !== undefined ? options.pnetThickRem : 1.38; // thickness
+    this.PNET_RING_COUNT  = options.pnetRingCount!== undefined ? options.pnetRingCount: 4;
+    this.PNET_RING_GAP    = options.pnetRingGap  !== undefined ? options.pnetRingGap  : 0.3;  // gap (frac of band)
+    this.PNET_REVEAL_OVL  = options.pnetRevealOvl!== undefined ? options.pnetRevealOvl: 0.5;
+    this.PNET_SPIN_OVL    = options.pnetSpinOvl  !== undefined ? options.pnetSpinOvl  : 0.866; // 360° stagger
+    this.PNET_SPIN_TURNS  = options.pnetSpinTurns!== undefined ? options.pnetSpinTurns: 1;     // 1 = 360°, 0.5 = 180°
+    this.PNET_YAW_DEG     = options.pnetYawDeg   !== undefined ? options.pnetYawDeg   : 8;    // fixed x tilt
+    this.PNET_SHADE_FACE  = options.pnetShadeFace!== undefined ? options.pnetShadeFace: 1.0;  // front/back caps
+    this.PNET_SHADE_SIDE  = options.pnetShadeSide!== undefined ? options.pnetShadeSide: 0.45; // outer rim
+    this.PNET_SHADE_INNER = options.pnetShadeInner!==undefined ? options.pnetShadeInner:0.6;  // inner wall
+    this.PNET_SHADE_BACK  = options.pnetShadeBack!== undefined ? options.pnetShadeBack: 0.85; // back cap
+    this.PNET_LIGHT_SIZE  = options.pnetLightSize!== undefined ? options.pnetLightSize: 0.7;
+    this.PNET_NSEG        = options.pnetNseg     !== undefined ? options.pnetNseg     : 64;   // circumference segs
+    this.PNET_SIDES       = options.pnetSides    !== undefined ? options.pnetSides    : 64;   // polygon sides (6 = hexagon, high = circle)
+    this.PNET_SIDE_OFFSET = options.pnetSideOffset!==undefined ? options.pnetSideOffset: Math.PI/2; // corner orientation (pointy-top)
+    this.PNET_HOP_MAX     = options.pnetHopMax   !== undefined ? options.pnetHopMax   : 4;
+    this.PNET_DIS_BAND    = options.pnetDisBand  !== undefined ? options.pnetDisBand  : 0.25;
+    this.PNET_DIS_JITTER  = options.pnetDisJitter!== undefined ? options.pnetDisJitter: 0.18;
+    this.pnetActive       = false;
+
+    // ── Trading & Markets — scrolling market chart of isometric bars ─────────
+    //   reveal (3 bars rise, staggered) → scroll (strip slides right→left through
+    //   N waves, then the tail exits left leaving an empty canvas). A mask shows
+    //   ~3 bars at a time with soft edge fade + a 90→100% "breathe" scale.
+    //   Public state driven by a GSAP timeline in animations.js (.pn-product-scroll.trade).
+    this.tradeState        = { reveal: 0, scroll: 0 };
+    this.TRD_BAR_WIDTH_REM = options.trdBarWidthRem !== undefined ? options.trdBarWidthRem : 1.4;
+    this.TRD_STEP_X_REM    = options.trdStepXRem    !== undefined ? options.trdStepXRem    : 2.1;
+    this.TRD_STEP_Y_REM    = options.trdStepYRem    !== undefined ? options.trdStepYRem    : 1.05;
+    this.TRD_VISIBLE       = options.trdVisible     !== undefined ? options.trdVisible     : 3;
+    this.TRD_SCROLL_START  = options.trdScrollStart !== undefined ? options.trdScrollStart : 1;
+    this.TRD_CHART_BARS    = options.trdChartBars   !== undefined ? options.trdChartBars   : 18;
+    this.TRD_SCROLL_BARS   = options.trdScrollBars  !== undefined ? options.trdScrollBars  : 21;
+    this.TRD_REVEAL_OVL    = options.trdRevealOvl   !== undefined ? options.trdRevealOvl   : 0.45;
+    this.TRD_FADE_BARS     = options.trdFadeBars    !== undefined ? options.trdFadeBars    : 0.9;
+    this.TRD_EDGE_SCALE    = options.trdEdgeScale   !== undefined ? options.trdEdgeScale   : 0.8;
+    this.TRD_MIN_H_REM     = options.trdMinHRem     !== undefined ? options.trdMinHRem     : 1.6;
+    this.TRD_MAX_H_REM     = options.trdMaxHRem     !== undefined ? options.trdMaxHRem     : 4.2;
+    this.TRD_WAVE_CYCLES   = options.trdWaveCycles  !== undefined ? options.trdWaveCycles  : 4;
+    this.TRD_WAVE_LEN      = options.trdWaveLen     !== undefined ? options.trdWaveLen     : 24;
+    this.TRD_SHADE_TOP     = options.trdShadeTop    !== undefined ? options.trdShadeTop    : 0.55;
+    this.TRD_SHADE_LEFT    = options.trdShadeLeft   !== undefined ? options.trdShadeLeft   : 0.35;
+    this.TRD_SHADE_RIGHT   = options.trdShadeRight  !== undefined ? options.trdShadeRight  : 1.0;
+    this.TRD_LIGHT_SIZE    = options.trdLightSize   !== undefined ? options.trdLightSize   : 0.7;
+    this.TRD_OFFSET_X_REM  = options.trdOffsetXRem  !== undefined ? options.trdOffsetXRem  : 0;   // shift right
+    this.TRD_OFFSET_Y_REM  = options.trdOffsetYRem  !== undefined ? options.trdOffsetYRem  : 0;   // shift down
+    this.tradeActive       = false;
+    // Build the market wave (smooth single sine, one peak/trough per cycle).
+    this._trdWave = (() => {
+      const n = this.TRD_WAVE_LEN, arr = new Array(n);
+      const per = n / this.TRD_WAVE_CYCLES;
+      const phase = Math.PI/2 - Math.floor(per/2) * (2*Math.PI/per);
+      for (let i=0;i<n;i++){
+        const t = i / n * Math.PI * 2 * this.TRD_WAVE_CYCLES + phase;
+        const norm = (Math.sin(t) + 1) / 2;
+        arr[i] = this.TRD_MIN_H_REM + norm * (this.TRD_MAX_H_REM - this.TRD_MIN_H_REM);
+      }
+      return arr;
+    })();
+
+    // ── Treasury Management — segmented ring (reveal → flip-wave + spin → exit) ──
+    //   A thick ring split into N arc slices with gaps. Reveal: slices scale up
+    //   staggered anti-clockwise from the left-middle. Middle: a flip wave rolls
+    //   each slice a full turn about its tangent axis (staggered) WHILE the whole
+    //   ring spins. Exit: slices scale down staggered. Orthographic, tilted +
+    //   rolled. State driven by a GSAP timeline in animations.js (.treasury).
+    this.treasuryState     = { reveal: 0, spin: 0, flip: 0, exit: 0 };
+    this.TRE_DISK_REM      = options.treDiskRem    !== undefined ? options.treDiskRem    : 9;
+    this.TRE_HOLE_REM      = options.treHoleRem    !== undefined ? options.treHoleRem    : 5;
+    this.TRE_THICK_REM     = options.treThickRem   !== undefined ? options.treThickRem   : 1.2;
+    this.TRE_TILT_DEG      = options.treTiltDeg    !== undefined ? options.treTiltDeg    : 30;
+    this.TRE_YAW_DEG       = options.treYawDeg     !== undefined ? options.treYawDeg     : 0;
+    this.TRE_ROLL_DEG      = options.treRollDeg    !== undefined ? options.treRollDeg    : -20;
+    this.TRE_SEGMENTS      = options.treSegments   !== undefined ? options.treSegments   : 10;
+    this.TRE_GAP_DEG       = options.treGapDeg     !== undefined ? options.treGapDeg     : 6;
+    this.TRE_NSEG          = options.treNseg       !== undefined ? options.treNseg       : 96;
+    this.TRE_SPIN_TURNS    = options.treSpinTurns  !== undefined ? options.treSpinTurns  : 0.5;
+    this.TRE_STAGGER_OVL   = options.treStaggerOvl !== undefined ? options.treStaggerOvl : 0.5;
+    this.TRE_FLIP_OVL      = options.treFlipOvl    !== undefined ? options.treFlipOvl    : 0.6;
+    this.TRE_FLIP_MAX      = options.treFlipMax    !== undefined ? options.treFlipMax    : 360;
+    this.TRE_SHADE_TOP     = options.treShadeTop   !== undefined ? options.treShadeTop   : 0.28;
+    this.TRE_SHADE_RIM     = options.treShadeRim   !== undefined ? options.treShadeRim   : 1.0;
+    this.TRE_SHADE_INNER   = options.treShadeInner !== undefined ? options.treShadeInner : 0.85;
+    this.TRE_SHADE_END     = options.treShadeEnd   !== undefined ? options.treShadeEnd   : 0.7;
+    this.TRE_SHADE_BOTTOM  = options.treShadeBottom!== undefined ? options.treShadeBottom: 0.4;
+    this.TRE_LIGHT_SIZE    = options.treLightSize  !== undefined ? options.treLightSize  : 0.7;
+    this.TRE_OFFSET_X_REM  = options.treOffsetXRem !== undefined ? options.treOffsetXRem : 0;
+    this.TRE_OFFSET_Y_REM  = options.treOffsetYRem !== undefined ? options.treOffsetYRem : 0;
+    this.treasuryActive    = false;
 
     // Disintegration tuning (radial dissolve, grid-quantized hop + fade)
     //   Cells dissolve in order of radial distance from globe centre, then
@@ -411,7 +590,7 @@ class LineGrid {
     const progress    = this.globeScrollProgress || 0;
 
     const GLOBE_R_FULL = rem * 10.7;
-    const GLOBE_R_END  = rem * 4;
+    const GLOBE_R_END  = rem * this.GLOBE_END_R_REM;   // ← tweak scale-down here
     const GLOBE_R_FULL_LERPED = GLOBE_R_FULL + (GLOBE_R_END - GLOBE_R_FULL) * progress;
 
     const GLOBE_R = GLOBE_R_FULL_LERPED * this.globeRevealScale;
@@ -419,7 +598,9 @@ class LineGrid {
 
     const GLOBE_CX = W / 2;
     const GLOBE_CY_START = H + GLOBE_R_FULL * 0.08;
-    const GLOBE_CY_END   = H / 2 + rem * 1.2;
+    // End position: canvas centre + GLOBE_END_VH worth of viewport height.
+    //   GLOBE_END_VH = -1  → moves up 100vh   |   0 → stays centred
+    const GLOBE_CY_END   = H / 2 + rem * 1.2 + this.GLOBE_END_VH * H;   // ← tweak vertical end here
     const GLOBE_CY = GLOBE_CY_START + (GLOBE_CY_END - GLOBE_CY_START) * progress;
     const FOCAL    = H * 1.1;
     const fCtx     = this.fCtx;
@@ -531,95 +712,928 @@ class LineGrid {
   }
 
   // =========================================================================
-  // FOREGROUND: BANK ACCOUNTS — currency flip (Dollar → Euro → Yen)
-  // Reveal: dollar scales up from centre. Loop: flip between currencies.
-  // Driven entirely by this.bankProgress (0→1) on scrub — no internal ticker.
-  // Sequence: reveal $ → hold → flip to € → hold → flip to ¥.
+  // FOREGROUND: BANK ACCOUNTS — 3D extruded currency sequence ($ → € → ¥)
+  // Real extrude + project, faces solid / walls smaller+lighter (depth).
+  // Driven by a GSAP timeline scrubbed via this.bankProgress (0→1):
+  //   reveal $ → hold → flip $→€ → hold → flip €→¥ → hold → dissolve out.
+  // The flip rotates the glyph to a thin slab at 90° where the symbol swaps.
   // =========================================================================
 
-  _renderCurrencyFace(symbol, scaleX, scaleY) {
+  _buildCurMask(symbol) {
+    const size = 512;
+    const c = document.createElement('canvas');
+    c.width = size; c.height = size;
+    const g = c.getContext('2d');
+    g.fillStyle = '#fff';
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.font = `700 ${size*0.72}px Georgia,"Times New Roman",serif`;
+    g.fillText(symbol, size/2, size/2 + size*0.02);
+    const d = g.getImageData(0,0,size,size).data;
+    const a = new Uint8Array(size*size);
+    for (let i=0;i<size*size;i++) a[i] = d[i*4+3];
+    return { size, a };
+  }
+  _curMaskAlpha(mask, u, v) {
+    if (u<0||u>1||v<0||v>1) return 0;
+    const x = Math.min(mask.size-1,(u*mask.size)|0);
+    const y = Math.min(mask.size-1,(v*mask.size)|0);
+    return mask.a[y*mask.size+x]/255;
+  }
+  _curRotNY(nx, nz, cosA, sinA) { return [ nx*cosA + nz*sinA, -nx*sinA + nz*cosA ]; }
+
+  // Symbols the currency sequence cycles through (animations.js references these).
+  static get CURRENCIES() { return ['$', '\u20AC', '\u00A5']; }
+
+  // Render the lit extruded glyph (grey faces/walls) into the offscreen buffer.
+  _renderCurrency3D(angle, symbol, scale) {
     const { W, H, DPR } = this;
     const fCtx = this.fCtx;
-    fCtx.clearRect(0, 0, W*DPR, H*DPR);
-    if (scaleX <= 0.001 || scaleY <= 0.001) return;
-
+    fCtx.setTransform(1,0,0,1,0,0);
+    fCtx.clearRect(0,0,W*DPR,H*DPR);
+    if (scale <= 0.001) return;
     fCtx.save();
-    fCtx.scale(DPR, DPR);
-    const cx = W / 2;
-    const cy = H / 2 + this._rem * 1.2;     // align with globe end-centre
-    const fontPx = Math.min(W, H) * 0.252;  // reduced 40% from 0.42
+    fCtx.scale(DPR,DPR);
 
-    fCtx.translate(cx, cy);
-    fCtx.scale(scaleX, scaleY);
-    fCtx.fillStyle = 'white';
-    fCtx.textAlign = 'center';
-    fCtx.textBaseline = 'middle';
-    fCtx.font = `700 ${fontPx}px Georgia, "Times New Roman", serif`;
-    fCtx.fillText(symbol, 0, 0);
+    const gh = Math.min(W,H) * this.CUR_GLYPH_FRAC * scale;
+    const gw = gh, halfW = gw/2, halfH = gh/2;
+    const depth = gh * this.CUR_DEPTH;
+    const cx = W/2, cy = H/2 + this._rem * 1.2;
+    const focal = gh * this.CUR_FOCAL;
+    const cosA = Math.cos(angle), sinA = Math.sin(angle);
+    const dot = Math.max(1.1, this.STEP*0.6);
+    const mask = this._curMasks[symbol];
+
+    const project = (lx,ly,lz) => {
+      const xr =  lx*cosA + lz*sinA;
+      const zr = -lx*sinA + lz*cosA;
+      const s  = focal/(focal+zr);
+      return { x: cx+xr*s, y: cy+ly*s, s };
+    };
+    const splat = (x,y,r,sh) => {
+      const val = Math.max(0,Math.min(255,Math.round(sh*255)));
+      fCtx.fillStyle = `rgb(${val},${val},${val})`;
+      fCtx.fillRect(x-r/2, y-r/2, r, r);
+    };
+
+    const FACE_STEP = 1/200, WALL_VSTEP = 1/180, WALL_ZSTEP = 1/22, EDGE_SCAN = 1/300;
+
+    // Faces — only the viewer-facing one
+    const faces = [ { z:-depth/2, nz:-1 }, { z:+depth/2, nz:1 } ];
+    for (const f of faces) {
+      const n = this._curRotNY(0, f.nz, cosA, sinA);
+      if (n[1] <= 0) continue;
+      for (let v=0; v<=1; v+=FACE_STEP) {
+        const ly = -halfH + v*gh;
+        for (let u=0; u<=1; u+=FACE_STEP) {
+          if (this._curMaskAlpha(mask,u,v) < 0.5) continue;
+          const lx = -halfW + u*gw;
+          const p = project(lx,ly,f.z);
+          splat(p.x,p.y, dot*p.s, this.CUR_FACE_SHADE);
+        }
+      }
+    }
+    // Side walls — viewer-facing silhouette edges swept across depth
+    for (let v=0; v<=1; v+=WALL_VSTEP) {
+      const ly = -halfH + v*gh;
+      let prev = 0;
+      for (let u=0; u<=1; u+=EDGE_SCAN) {
+        const cur = this._curMaskAlpha(mask,u,v) >= 0.5 ? 1 : 0;
+        if (cur !== prev) {
+          const lx = -halfW + u*gw;
+          const dir = cur>prev ? -1 : 1;
+          const n = this._curRotNY(dir, 0, cosA, sinA);
+          if (n[1] > 0) {
+            for (let z=-0.5; z<=0.5; z+=WALL_ZSTEP) {
+              const p = project(lx, ly, z*depth);
+              splat(p.x,p.y, dot*p.s, this.CUR_WALL_SHADE);
+            }
+          }
+          prev = cur;
+        }
+      }
+    }
     fCtx.restore();
   }
 
-  _scanCurrencyToTarget() {
-    const { W, H, DPR } = this;
-    const data = this.fCtx.getImageData(0, 0, W*DPR, H*DPR), stride = Math.round(W * DPR);
-    const cx = W / 2, cy = H / 2 + this._rem * 1.2;
-    const shapeR = Math.min(W, H) * 0.18;  // matched to reduced glyph
-    const getAlpha = (x, y) => {
-      const px=Math.round(Math.max(0,Math.min(W*DPR-1,x*DPR)));
-      const py=Math.round(Math.max(0,Math.min(H*DPR-1,y*DPR)));
-      return data.data[(py*stride+px)*4+3]/255;
-    };
-    this._scanToFgTarget(getAlpha, (px, py) => {
-      const ndx = (px - cx) / shapeR, ndy = (py - cy) / shapeR;
-      return Math.max(0.15, 1 - Math.sqrt(ndx*ndx + ndy*ndy) * 0.8);
-    });
+  // Render currency cells directly: face = solid line colour at full size;
+  // wall = smaller & lighter. With grid-quantized hop dissolve on exit.
+  _drawCurrency3D() {
+    const st = this._curState;
+    this._renderCurrency3D(st.flipAngle, st.symbol, st.scale);
+
+    const { W, H, DPR, COLS, ROWS, STEP } = this;
+    const data = this.fCtx.getImageData(0, 0, W*DPR, H*DPR).data;
+    const stride = Math.round(W * DPR);
+    const half = STEP / 2;
+    const [lr, lg, lb] = this.LINE_COLOR.split(',').map(Number);
+    const dissolve = st.dissolve;
+
+    // dissolve front (grid-quantized radial hop), centred on currency centre.
+    // gr is scaled to the GLYPH radius (not the canvas) so the glyph's own cells
+    // span the full nd 0→1 range — edge cells (nd≈1, rnd≈0) dissolve first, centre
+    // cells (nd≈0, rnd≈1) last. Using half-canvas here left every glyph cell at
+    // rnd≈1, so the front spent the first ~half of its travel crossing empty space
+    // before reaching any pixel (the dead zone).
+    const gcx = W/2, gcy = H/2 + this._rem*1.2;
+    const gr  = Math.min(W,H) * this.CUR_GLYPH_FRAC * 0.6;   // ~glyph radius
+    const band = this.CUR_DIS_BAND, jitAmt = this.CUR_DIS_JITTER, hopMax = this.CUR_HOP_MAX;
+    // Front travels from `band` (first cell triggers immediately, no dead zone)
+    // up to the value that clears the highest-threshold centre cell at dissolve=1.
+    const frontStart = band;
+    const frontEnd   = 1 + jitAmt*0.5 + band*2 + 0.05;
+    const front = frontStart + (frontEnd - frontStart) * dissolve;
+
+    for (let c = 0; c < COLS; c++) {
+      const sx = this.colXCache[c] + half;
+      const px = Math.min(W*DPR-1, Math.max(0,(sx*DPR)|0));
+      const jitCol = this._cellJitter[c];
+      const hopCol = this._cellHopJit[c];
+      for (let r = 0; r < ROWS; r++) {
+        const sy = this.rowYCache[r] + half;
+        const py = Math.min(H*DPR-1, Math.max(0,(sy*DPR)|0));
+        const idx = (py*stride+px)*4;
+        if (data[idx+3]/255 <= this.THRESHOLD) continue;
+        const shade = data[idx]/255;             // ~1 face, ~0.5 wall
+        const isFace = shade >= 0.75;
+        const baseSz = this.FG_MAX * (isFace ? 1 : this.CUR_WALL_SIZE);
+
+        if (dissolve <= 0.0001) {
+          this.ctx.fillStyle = `rgba(${lr},${lg},${lb},${shade})`;
+          this.ctx.fillRect(this.colXCache[c]+half-baseSz/2, this.rowYCache[r]+half-baseSz/2, baseSz, baseSz);
+          continue;
+        }
+        // grid-quantized radial hop dissolve
+        const ndx = (sx - gcx)/gr, ndy = (sy - gcy)/gr;
+        const nd = Math.sqrt(ndx*ndx + ndy*ndy);
+        const rnd = 1 - nd;
+        const thresh = rnd + (jitCol[r] - 0.5) * jitAmt;
+        const local = (front - band - thresh) / band;
+        if (local <= 0) {
+          this.ctx.fillStyle = `rgba(${lr},${lg},${lb},${shade})`;
+          this.ctx.fillRect(this.colXCache[c]+half-baseSz/2, this.rowYCache[r]+half-baseSz/2, baseSz, baseSz);
+          continue;
+        }
+        const lp = Math.min(1, local);
+        const cellMaxHops = 1 + Math.floor(hopCol[r] * hopMax);
+        const hops = Math.floor(lp * cellMaxHops + 0.0001);
+        const fade = 1 - lp;
+        if (fade <= 0.01) continue;
+        let ux = sx - gcx, uy = sy - gcy;
+        const ul = Math.hypot(ux, uy) || 1; ux/=ul; uy/=ul;
+        const axv = Math.abs(ux), ayv = Math.abs(uy);
+        let dcol = 0, drow = 0;
+        if (axv > 0.38) dcol = ux > 0 ? 1 : -1;
+        if (ayv > 0.38) drow = uy > 0 ? 1 : -1;
+        if (dcol === 0 && drow === 0) dcol = ux >= 0 ? 1 : -1;
+        const hCol = c + dcol*hops, hRow = r + drow*hops;
+        if (hCol < 0 || hCol >= COLS || hRow < 0 || hRow >= ROWS) continue;
+        const sz = baseSz * (0.6 + fade*0.4);
+        if (sz <= 0.01) continue;
+        this.ctx.fillStyle = `rgba(${lr},${lg},${lb},${shade*fade})`;
+        this.ctx.fillRect(this.colXCache[hCol]+half-sz/2, this.rowYCache[hRow]+half-sz/2, sz, sz);
+      }
+    }
   }
 
   _drawBankAccounts() {
-    if (this.bankProgress <= 0.001) return;
+    if (this.curState.scale <= 0.001) return;
+    if (!this._curMasks) {
+      this._curMasks = {
+        '$':      this._buildCurMask('$'),
+        '\u20AC': this._buildCurMask('\u20AC'),
+        '\u00A5': this._buildCurMask('\u00A5'),
+      };
+    }
+    // State (scale / flipAngle / symbol / dissolve) is driven by the GSAP
+    // timeline in animations.js. We just render whatever it currently holds.
+    this._drawCurrency3D();
+  }
 
-    const CURRENCIES = ['$', '\u20AC', '\u00A5'];  // Dollar, Euro, Yen
-    const p = Math.min(1, this.bankProgress);
+  // =========================================================================
+  // FOREGROUND: DIGITAL ASSET MANAGEMENT — isometric cube
+  //   6 mini cubes reveal (clockwise) → fly to centre & merge (centre cube
+  //   accumulates) → spin ×2 → grid-quantized hop dissolve. State lives in
+  //   this.damState, driven by a GSAP timeline in animations.js.
+  // =========================================================================
 
-    // Map scrub progress 0→1 across the whole sequence:
-    //   [0.00 – 0.30]  REVEAL  : dollar scales 0→1 from centre
-    //   [0.30 – 0.45]  HOLD    : dollar full
-    //   [0.45 – 0.65]  FLIP 1  : dollar → euro
-    //   [0.65 – 0.80]  HOLD    : euro full
-    //   [0.80 – 1.00]  FLIP 2  : euro → yen
-    const seg = (a, b) => Math.max(0, Math.min(1, (p - a) / (b - a)));
-    // Cubic ease for flip halves so the card has weight
-    const flipEase = (t) => (t < 0.5 ? 2*t*t : 1 - Math.pow(-2*t + 2, 2)/2);
+  _damRotY(p, c, s) { return [ p[0]*c + p[2]*s, p[1], -p[0]*s + p[2]*c ]; }
 
-    if (p < 0.30) {
-      // REVEAL — dollar scales up (clean ease-out, no bounce)
-      const t = seg(0.0, 0.30);
-      const eased = 1 - Math.pow(1 - t, 3);
-      this._renderCurrencyFace(CURRENCIES[0], eased, eased);
+  _damProject(p, cx, cy, scale) {
+    const ct = Math.cos(ISO_A), st = Math.sin(ISO_A);
+    const y2 = p[1]*ct + p[2]*st;     // screen y (down positive)
+    const z2 = -p[1]*st + p[2]*ct;    // toward viewer
+    return { x: cx + p[0]*scale, y: cy + y2*scale, z: z2 };
+  }
 
-    } else if (p < 0.45) {
-      // HOLD dollar
-      this._renderCurrencyFace(CURRENCIES[0], 1, 1);
+  // Stagger helper: global progress p → this item's local 0→1 (clockwise order).
+  _damStagger(p, i, n, overlap) {
+    const span  = 1 / (n - (n-1)*overlap);
+    const start = i * span * (1 - overlap);
+    return Math.max(0, Math.min(1, (p - start) / span));
+  }
 
-    } else if (p < 0.65) {
-      // FLIP 1 : dollar → euro  (scaleX squeeze out then in)
-      const e = flipEase(seg(0.45, 0.65));
-      if (e < 0.5) this._renderCurrencyFace(CURRENCIES[0], 1 - e*2, 1);
-      else         this._renderCurrencyFace(CURRENCIES[1], (e - 0.5)*2, 1);
+  // Draw one shaded cube into the offscreen buffer (fCtx). Faces classified by
+  // rotated normal so top/left/right tones stay correct through the spin.
+  _damDrawCube(cxp, cyp, rot, scale) {
+    const fCtx = this.fCtx;
+    const ry = rot + ISO_BASE_Y;
+    const c = Math.cos(ry), s = Math.sin(ry);
+    const u = 1;
+    const C = [
+      [-u,-u,-u],[ u,-u,-u],[ u,-u, u],[-u,-u, u],
+      [-u, u,-u],[ u, u,-u],[ u, u, u],[-u, u, u],
+    ].map(p => this._damProject(this._damRotY(p, c, s), cxp, cyp, scale));
 
-    } else if (p < 0.80) {
-      // HOLD euro
-      this._renderCurrencyFace(CURRENCIES[1], 1, 1);
+    const faces = [
+      { idx:[0,1,2,3], n:[0,-1,0] },
+      { idx:[4,7,6,5], n:[0, 1,0] },
+      { idx:[0,3,7,4], n:[-1,0,0] },
+      { idx:[1,5,6,2], n:[ 1,0,0] },
+      { idx:[3,2,6,7], n:[0,0, 1] },
+      { idx:[0,4,5,1], n:[0,0,-1] },
+    ];
+    const ct = Math.cos(ISO_A), st = Math.sin(ISO_A);
+    faces.forEach(f => {
+      const rn = this._damRotY(f.n, c, s);
+      const screenY = rn[1]*ct + rn[2]*st;   // up-facing = negative
+      const vz      = -rn[1]*st + rn[2]*ct;  // toward viewer
+      const nx      = rn[0];
+      f.vz = vz;
+      if (screenY < -0.5) f.shade = this.DAM_SHADE_TOP;
+      else if (nx > 0)    f.shade = this.DAM_SHADE_RIGHT;
+      else                f.shade = this.DAM_SHADE_LEFT;
+    });
+    faces.sort((a,b) => a.vz - b.vz);
 
+    faces.forEach(f => {
+      if (f.vz <= 0.001) return;
+      const v = Math.max(0, Math.min(255, Math.round(f.shade*255)));
+      fCtx.fillStyle = `rgb(${v},${v},${v})`;
+      fCtx.beginPath();
+      const q = f.idx.map(i => C[i]);
+      fCtx.moveTo(q[0].x, q[0].y);
+      for (let i=1;i<q.length;i++) fCtx.lineTo(q[i].x, q[i].y);
+      fCtx.closePath();
+      fCtx.fill();
+    });
+  }
+
+  // Render the full cube scene (reveal + merge OR merged cube) to the buffer.
+  _damRenderScene() {
+    const { W, H, DPR } = this;
+    const fCtx = this.fCtx;
+    fCtx.setTransform(1,0,0,1,0,0);
+    fCtx.clearRect(0,0,W*DPR,H*DPR);
+    fCtx.save();
+    fCtx.scale(DPR,DPR);
+
+    const st = this.damState;
+    const cx = W/2, cy = H/2 + this._rem*1.2;
+    const bigHalf  = this._rem * this.DAM_CUBE_REM / ISO_SPAN;
+    const miniHalf = this._rem * this.DAM_MINI_REM / ISO_SPAN;
+    const SC = this.DAM_SCATTER;
+
+    if (st.dissolve <= 0.0001 && st.merge < 0.999) {
+      const n = SC.length;
+      const span = 1 / (n - (n-1)*this.DAM_MERGE_OVL);
+      const firstLanded = span;
+
+      // Centre cube appears once the first mini lands, then grows mini→big.
+      if (st.merge > firstLanded) {
+        const g = (st.merge - firstLanded) / (1 - firstLanded);
+        const centreScl = miniHalf + (bigHalf - miniHalf) * Math.max(0, Math.min(1, g));
+        this._damDrawCube(cx, cy, st.rot, centreScl);
+      }
+
+      SC.forEach((slot, i) => {
+        const revLocal = this._damStagger(st.reveal, i, n, this.DAM_REVEAL_OVL);
+        const mLocal   = this._damStagger(st.merge,  i, n, this.DAM_MERGE_OVL);
+        if (mLocal >= 0.999) return;                       // absorbed
+        if (revLocal <= 0.001 && mLocal <= 0.001) return;
+        const sx = cx + slot.dx * bigHalf * (1 - mLocal);
+        const sy = cy + slot.dy * bigHalf * (1 - mLocal);
+        const scl = miniHalf * revLocal;
+        if (scl <= 0.001) return;
+        this._damDrawCube(sx, sy, st.rot, scl);
+      });
     } else {
-      // FLIP 2 : euro → yen
-      const e = flipEase(seg(0.80, 1.00));
-      if (e < 0.5) this._renderCurrencyFace(CURRENCIES[1], 1 - e*2, 1);
-      else         this._renderCurrencyFace(CURRENCIES[2], (e - 0.5)*2, 1);
+      this._damDrawCube(cx, cy, st.rot, bigHalf);
+    }
+    fCtx.restore();
+  }
+
+  // Scan the buffer → pixel grid (face shade → dark-pixel size+opacity), with
+  // the same grid-quantized hop dissolve used by the currency exit.
+  _drawDigitalAsset() {
+    this._damRenderScene();
+
+    const { W, H, DPR, COLS, ROWS, STEP } = this;
+    const data = this.fCtx.getImageData(0,0,W*DPR,H*DPR).data;
+    const stride = Math.round(W * DPR);
+    const half = STEP/2;
+    const [lr, lg, lb] = this.LINE_COLOR.split(',').map(Number);
+    const st = this.damState;
+    const dissolve = st.dissolve;
+
+    const gcx = W/2, gcy = H/2 + this._rem*1.2;
+    const gr  = this._rem * this.DAM_CUBE_REM * 0.6;
+    const band = this.DAM_DIS_BAND, jitAmt = this.DAM_DIS_JITTER, hopMax = this.DAM_HOP_MAX;
+    const frontStart = band;
+    const frontEnd   = 1 + jitAmt*0.5 + band*2 + 0.05;
+    const front = frontStart + (frontEnd - frontStart) * dissolve;
+
+    for (let c = 0; c < COLS; c++) {
+      const sx = this.colXCache[c] + half;
+      const px = Math.min(W*DPR-1, Math.max(0,(sx*DPR)|0));
+      const jitCol = this._cellJitter[c];
+      const hopCol = this._cellHopJit[c];
+      for (let r = 0; r < ROWS; r++) {
+        const sy = this.rowYCache[r] + half;
+        const py = Math.min(H*DPR-1, Math.max(0,(sy*DPR)|0));
+        const idx = (py*stride+px)*4;
+        if (data[idx+3]/255 <= this.THRESHOLD) continue;
+        const shade = data[idx]/255;
+        const sizeFrac = this.DAM_LIGHT_SIZE + (1 - this.DAM_LIGHT_SIZE) * shade;
+        const baseSz = this.FG_MAX * sizeFrac;
+
+        if (dissolve <= 0.0001) {
+          this.ctx.fillStyle = `rgba(${lr},${lg},${lb},${shade})`;
+          this.ctx.fillRect(this.colXCache[c]+half-baseSz/2, this.rowYCache[r]+half-baseSz/2, baseSz, baseSz);
+          continue;
+        }
+        const ndx = (sx-gcx)/gr, ndy = (sy-gcy)/gr;
+        const nd = Math.sqrt(ndx*ndx + ndy*ndy);
+        const rnd = 1 - nd;
+        const thresh = rnd + (jitCol[r]-0.5)*jitAmt;
+        const local = (front - band - thresh) / band;
+        if (local <= 0) {
+          this.ctx.fillStyle = `rgba(${lr},${lg},${lb},${shade})`;
+          this.ctx.fillRect(this.colXCache[c]+half-baseSz/2, this.rowYCache[r]+half-baseSz/2, baseSz, baseSz);
+          continue;
+        }
+        const lp = Math.min(1, local);
+        const cellMaxHops = 1 + Math.floor(hopCol[r]*hopMax);
+        const hops = Math.floor(lp*cellMaxHops + 0.0001);
+        const fade = 1 - lp;
+        if (fade <= 0.01) continue;
+        let ux = sx-gcx, uy = sy-gcy;
+        const ul = Math.hypot(ux,uy) || 1; ux/=ul; uy/=ul;
+        const axv = Math.abs(ux), ayv = Math.abs(uy);
+        let dcol=0, drow=0;
+        if (axv > 0.38) dcol = ux>0?1:-1;
+        if (ayv > 0.38) drow = uy>0?1:-1;
+        if (dcol===0 && drow===0) dcol = ux>=0?1:-1;
+        const hCol = c+dcol*hops, hRow = r+drow*hops;
+        if (hCol<0||hCol>=COLS||hRow<0||hRow>=ROWS) continue;
+        const sz = baseSz*(0.6+fade*0.4);
+        if (sz <= 0.01) continue;
+        this.ctx.fillStyle = `rgba(${lr},${lg},${lb},${shade*fade})`;
+        this.ctx.fillRect(this.colXCache[hCol]+half-sz/2, this.rowYCache[hRow]+half-sz/2, sz, sz);
+      }
+    }
+  }
+
+  // =========================================================================
+  // FOREGROUND: PAVENET — concentric extruded rings
+  //   reveal (rings scale up, staggered) → spin Y 360° (staggered) → spin X
+  //   360° (staggered) → grid-quantized hop dissolve. State in this.pnetState,
+  //   driven by a GSAP timeline in animations.js.
+  // =========================================================================
+
+  // Rotate about Y (x,z) then about X (y,z). Returns rotated 3D coords.
+  _pnetRotate3(p, ry, rx) {
+    const cy = Math.cos(ry), sy = Math.sin(ry);
+    let x =  p[0]*cy + p[2]*sy;
+    let z = -p[0]*sy + p[2]*cy;
+    let y =  p[1];
+    const cx2 = Math.cos(rx), sx2 = Math.sin(rx);
+    const y2 = y*cx2 - z*sx2;
+    const z2 = y*sx2 + z*cx2;
+    return [x, y2, z2];
+  }
+  _pnetProject(p, ry, rx, cx, cy, scale) {
+    const r = this._pnetRotate3(p, ry, rx);
+    return { x: cx + r[0]*scale, y: cy + r[1]*scale, z: r[2] };
+  }
+  _pnetFaceVisible(n, ry, rx) { return this._pnetRotate3(n, ry, rx)[2]; }
+
+  // Per-ring stagger: global progress p → ring i local 0→1 (outer i=0 leads).
+  _pnetStagger(p, i, n, overlap) {
+    const span  = 1 / (n - (n-1)*overlap);
+    const start = i * span * (1 - overlap);
+    return Math.max(0, Math.min(1, (p - start) / span));
+  }
+
+  // Draw one annular ring (outer rO, inner rI) extruded along z, rotated by
+  // ry (vertical) + rx (horizontal). scale = reveal scale. Solid-filled faces.
+  _pnetDrawRing(rO, rI, ry, rx, scale, cx, cy) {
+    const fc = this.fCtx;
+    const halfT = this._rem * this.PNET_THICK_REM * 0.5;
+    // NSEG must be a multiple of the polygon sides so vertices land on corners.
+    const S0 = this.PNET_SIDES;
+    const NSEG = S0 * Math.max(1, Math.round(this.PNET_NSEG / S0));
+    const proj = (p) => this._pnetProject(p, ry, rx, cx, cy, scale);
+    const vis  = (n) => this._pnetFaceVisible(n, ry, rx);
+
+    // Polygon radius: for PNET_SIDES corners, returns the radius at angle `ang`
+    // so the outline has straight edges between corners (apothem formula). A high
+    // side count → effectively a circle; 6 → hexagon.
+    const S = this.PNET_SIDES;
+    const seg = Math.PI*2 / S;
+    const apo = Math.cos(seg/2);
+    const polyR = (rad, ang) => {
+      // distance from corner-aligned angle; corners at multiples of seg + offset
+      const a = ((ang - this.PNET_SIDE_OFFSET) % seg + seg) % seg;
+      return rad * apo / Math.cos(a - seg/2);
+    };
+
+    const drawCap = (sign, shade) => {
+      const v = Math.max(0, Math.min(255, Math.round(shade*255)));
+      fc.fillStyle = `rgb(${v},${v},${v})`;
+      fc.beginPath();
+      for (let a=0; a<=NSEG; a++) {
+        const ang = (a/NSEG)*Math.PI*2;
+        const rr = polyR(rO, ang);
+        const p = proj([Math.cos(ang)*rr, Math.sin(ang)*rr, sign*halfT]);
+        if (a===0) fc.moveTo(p.x, p.y); else fc.lineTo(p.x, p.y);
+      }
+      for (let a=NSEG; a>=0; a--) {
+        const ang = (a/NSEG)*Math.PI*2;
+        const rr = polyR(rI, ang);
+        const p = proj([Math.cos(ang)*rr, Math.sin(ang)*rr, sign*halfT]);
+        fc.lineTo(p.x, p.y);
+      }
+      fc.closePath();
+      fc.fill('evenodd');
+    };
+
+    const drawWall = (rad, nrmSign, shade) => {
+      const v = Math.max(0, Math.min(255, Math.round(shade*255)));
+      fc.fillStyle = `rgb(${v},${v},${v})`;
+      for (let a=0; a<NSEG; a++) {
+        const a0 = (a/NSEG)*Math.PI*2, a1 = ((a+1)/NSEG)*Math.PI*2;
+        const am = (a0+a1)/2;
+        if (vis([Math.cos(am)*nrmSign, Math.sin(am)*nrmSign, 0]) <= 0.001) continue;
+        const r0 = polyR(rad, a0), r1 = polyR(rad, a1);
+        const c0=Math.cos(a0), s0=Math.sin(a0), c1=Math.cos(a1), s1=Math.sin(a1);
+        const q = [
+          proj([c0*r0, s0*r0,  halfT]),
+          proj([c1*r1, s1*r1,  halfT]),
+          proj([c1*r1, s1*r1, -halfT]),
+          proj([c0*r0, s0*r0, -halfT]),
+        ];
+        fc.beginPath();
+        fc.moveTo(q[0].x,q[0].y);
+        for (let i=1;i<4;i++) fc.lineTo(q[i].x,q[i].y);
+        fc.closePath();
+        fc.fill();
+      }
+    };
+
+    const frontVis = vis([0,0, 1]);
+    const backVis  = vis([0,0,-1]);
+    const frontFirst = frontVis < backVis;
+
+    if (frontFirst && frontVis > 0.001) drawCap(1,  this.PNET_SHADE_FACE);
+    if (!frontFirst && backVis > 0.001) drawCap(-1, this.PNET_SHADE_BACK);
+
+    drawWall(rO, +1, this.PNET_SHADE_SIDE);
+    drawWall(rI, -1, this.PNET_SHADE_INNER);
+
+    if (frontFirst && backVis > 0.001) drawCap(-1, this.PNET_SHADE_BACK);
+    if (!frontFirst && frontVis > 0.001) drawCap(1,  this.PNET_SHADE_FACE);
+  }
+
+  _pnetRenderScene() {
+    const { W, H, DPR } = this;
+    const fc = this.fCtx;
+    fc.setTransform(1,0,0,1,0,0);
+    fc.clearRect(0,0,W*DPR,H*DPR);
+    fc.save();
+    fc.scale(DPR,DPR);
+
+    const st = this.pnetState;
+    const cx = W/2, cy = H/2 + this._rem*1.2;       // align with other products
+    const R  = this._rem * this.PNET_DISK_REM * 0.5;
+    const N  = this.PNET_RING_COUNT;
+    const gap = this.PNET_RING_GAP;
+    const yawRad = this.PNET_YAW_DEG * Math.PI/180;
+
+    // OUTER → INNER so inner rings nest within outer holes.
+    for (let i = N-1; i >= 0; i--) {
+      const bandO = R * (i+1) / N;
+      const bandI = R * i / N;
+      const g = (bandO - bandI) * gap * 0.5;
+      const rO = bandO - g;
+      const rI = bandI + g;
+
+      const revL = this._pnetStagger(st.reveal, i, N, this.PNET_REVEAL_OVL);
+      const scl  = revL;
+      if (scl <= 0.001) continue;
+
+      const ryL = this._pnetStagger(st.spinY, i, N, this.PNET_SPIN_OVL);
+      const rxL = this._pnetStagger(st.spinX, i, N, this.PNET_SPIN_OVL);
+      const sweep = Math.PI * 2 * this.PNET_SPIN_TURNS;
+      const ry  = ryL * sweep;
+      const rx  = yawRad + rxL * sweep;
+
+      this._pnetDrawRing(rO, rI, ry, rx, scl, cx, cy);
+    }
+    fc.restore();
+  }
+
+  _drawPaveNet() {
+    this._pnetRenderScene();
+
+    const { W, H, DPR, COLS, ROWS, STEP } = this;
+    const data = this.fCtx.getImageData(0,0,W*DPR,H*DPR).data;
+    const stride = Math.round(W * DPR);
+    const half = STEP/2;
+    const [lr, lg, lb] = this.LINE_COLOR.split(',').map(Number);
+    const st = this.pnetState;
+    const dissolve = st.dissolve;
+
+    const gcx = W/2, gcy = H/2 + this._rem*1.2;
+    const gr  = this._rem * this.PNET_DISK_REM * 0.5 * 1.05;
+    const band = this.PNET_DIS_BAND, jitAmt = this.PNET_DIS_JITTER, hopMax = this.PNET_HOP_MAX;
+    const frontStart = band;
+    const frontEnd   = 1 + jitAmt*0.5 + band*2 + 0.05;
+    const front = frontStart + (frontEnd - frontStart) * dissolve;
+
+    for (let c = 0; c < COLS; c++) {
+      const sx = this.colXCache[c] + half;
+      const px = Math.min(W*DPR-1, Math.max(0,(sx*DPR)|0));
+      const jitCol = this._cellJitter[c];
+      const hopCol = this._cellHopJit[c];
+      for (let r = 0; r < ROWS; r++) {
+        const sy = this.rowYCache[r] + half;
+        const py = Math.min(H*DPR-1, Math.max(0,(sy*DPR)|0));
+        const idx = (py*stride+px)*4;
+        if (data[idx+3]/255 <= this.THRESHOLD) continue;
+        const shade = data[idx]/255;
+        const sizeFrac = this.PNET_LIGHT_SIZE + (1 - this.PNET_LIGHT_SIZE) * shade;
+        const baseSz = this.FG_MAX * sizeFrac;
+
+        if (dissolve <= 0.0001) {
+          this.ctx.fillStyle = `rgba(${lr},${lg},${lb},${shade})`;
+          this.ctx.fillRect(this.colXCache[c]+half-baseSz/2, this.rowYCache[r]+half-baseSz/2, baseSz, baseSz);
+          continue;
+        }
+        const ndx = (sx-gcx)/gr, ndy = (sy-gcy)/gr;
+        const nd = Math.sqrt(ndx*ndx + ndy*ndy);
+        const rnd = 1 - nd;
+        const thresh = rnd + (jitCol[r]-0.5)*jitAmt;
+        const local = (front - band - thresh) / band;
+        if (local <= 0) {
+          this.ctx.fillStyle = `rgba(${lr},${lg},${lb},${shade})`;
+          this.ctx.fillRect(this.colXCache[c]+half-baseSz/2, this.rowYCache[r]+half-baseSz/2, baseSz, baseSz);
+          continue;
+        }
+        const lp = Math.min(1, local);
+        const cellMaxHops = 1 + Math.floor(hopCol[r]*hopMax);
+        const hops = Math.floor(lp*cellMaxHops + 0.0001);
+        const fade = 1 - lp;
+        if (fade <= 0.01) continue;
+        let ux = sx-gcx, uy = sy-gcy;
+        const ul = Math.hypot(ux,uy) || 1; ux/=ul; uy/=ul;
+        const axv = Math.abs(ux), ayv = Math.abs(uy);
+        let dcol=0, drow=0;
+        if (axv > 0.38) dcol = ux>0?1:-1;
+        if (ayv > 0.38) drow = uy>0?1:-1;
+        if (dcol===0 && drow===0) dcol = ux>=0?1:-1;
+        const hCol = c+dcol*hops, hRow = r+drow*hops;
+        if (hCol<0||hCol>=COLS||hRow<0||hRow>=ROWS) continue;
+        const sz = baseSz*(0.6+fade*0.4);
+        if (sz <= 0.01) continue;
+        this.ctx.fillStyle = `rgba(${lr},${lg},${lb},${shade*fade})`;
+        this.ctx.fillRect(this.colXCache[hCol]+half-sz/2, this.rowYCache[hRow]+half-sz/2, sz, sz);
+      }
+    }
+  }
+
+  // =========================================================================
+  // FOREGROUND: TRADING & MARKETS — scrolling chart of isometric bars
+  //   reveal (3 bars rise, staggered) → scroll (strip slides right→left through
+  //   the chart, then exits left → empty canvas). Mask window + soft edge fade +
+  //   90→100% breathe scale. State in this.tradeState, driven by animations.js.
+  // =========================================================================
+
+  _trdRotY(p, c, s) { return [ p[0]*c + p[2]*s, p[1], -p[0]*s + p[2]*c ]; }
+
+  _trdProject(p, cx, cy, scale) {
+    const ct = Math.cos(ISO_A), st = Math.sin(ISO_A);
+    const y2 = p[1]*ct + p[2]*st;
+    const z2 = -p[1]*st + p[2]*ct;
+    return { x: cx + p[0]*scale, y: cy + y2*scale, z: z2 };
+  }
+
+  // Draw a box prism (half-extents hx,hy,hz) into the offscreen buffer at fade f.
+  _trdDrawBox(cxp, cyp, hx, hy, hz, scale, fade) {
+    const fCtx = this.fCtx;
+    const c = Math.cos(ISO_BASE_Y), s = Math.sin(ISO_BASE_Y);
+    const C = [
+      [-hx,-hy,-hz],[ hx,-hy,-hz],[ hx,-hy, hz],[-hx,-hy, hz],
+      [-hx, hy,-hz],[ hx, hy,-hz],[ hx, hy, hz],[-hx, hy, hz],
+    ].map(p => this._trdProject(this._trdRotY(p, c, s), cxp, cyp, scale));
+
+    const faces = [
+      { idx:[0,1,2,3], n:[0,-1,0] },
+      { idx:[4,7,6,5], n:[0, 1,0] },
+      { idx:[0,3,7,4], n:[-1,0,0] },
+      { idx:[1,5,6,2], n:[ 1,0,0] },
+      { idx:[3,2,6,7], n:[0,0, 1] },
+      { idx:[0,4,5,1], n:[0,0,-1] },
+    ];
+    const ct = Math.cos(ISO_A), st = Math.sin(ISO_A);
+    faces.forEach(f => {
+      const rn = this._trdRotY(f.n, c, s);
+      const screenY = rn[1]*ct + rn[2]*st;
+      const vz      = -rn[1]*st + rn[2]*ct;
+      const nx      = rn[0];
+      f.vz = vz;
+      if (screenY < -0.5) f.shade = this.TRD_SHADE_TOP;
+      else if (nx > 0)    f.shade = this.TRD_SHADE_RIGHT;
+      else                f.shade = this.TRD_SHADE_LEFT;
+    });
+    faces.sort((a,b) => a.vz - b.vz);
+
+    fCtx.globalAlpha = Math.max(0, Math.min(1, fade));
+    faces.forEach(f => {
+      if (f.vz <= 0.001) return;
+      const v = Math.max(0, Math.min(255, Math.round(f.shade*255)));
+      fCtx.fillStyle = `rgb(${v},${v},${v})`;
+      fCtx.beginPath();
+      const q = f.idx.map(i => C[i]);
+      fCtx.moveTo(q[0].x, q[0].y);
+      for (let i=1;i<q.length;i++) fCtx.lineTo(q[i].x, q[i].y);
+      fCtx.closePath();
+      fCtx.fill();
+    });
+    fCtx.globalAlpha = 1;
+  }
+
+  _trdRenderScene() {
+    const { W, H, DPR } = this;
+    const fCtx = this.fCtx;
+    fCtx.setTransform(1,0,0,1,0,0);
+    fCtx.clearRect(0,0,W*DPR,H*DPR);
+    fCtx.save();
+    fCtx.scale(DPR,DPR);
+
+    const st = this.tradeState;
+    const hx = this._rem * this.TRD_BAR_WIDTH_REM * 0.5;
+    const hz = hx;
+    const scale = 1;
+    const ct = Math.cos(ISO_A);
+    const dxScreen = this._rem * this.TRD_STEP_X_REM;
+    const dyScreen = this._rem * this.TRD_STEP_Y_REM;
+
+    const cx = W/2 + this._rem * this.TRD_OFFSET_X_REM;
+    const cy = H/2 + this._rem*1.2 + this._rem * this.TRD_OFFSET_Y_REM;
+    const vis = this.TRD_VISIBLE;
+    const halfWin = vis / 2;
+    const fade = this.TRD_FADE_BARS;
+    const WAVE = this._trdWave, WLEN = this.TRD_WAVE_LEN;
+
+    const scrollPos = this.TRD_SCROLL_START + st.scroll * this.TRD_SCROLL_BARS;
+    const scrolling = st.scroll > 0.0001;
+
+    const startIdx = this.TRD_SCROLL_START;
+    const revealBars = [startIdx-1, startIdx, startIdx+1];
+    const firstBar = startIdx - 1;
+    const lastBar = firstBar + this.TRD_CHART_BARS;
+    const revLocal = (j) => {
+      const n = revealBars.length, ov = this.TRD_REVEAL_OVL;
+      const span = 1 / (n - (n-1)*ov);
+      const start = j * span * (1 - ov);
+      return Math.max(0, Math.min(1, (st.reveal - start) / span));
+    };
+
+    const lo = Math.floor(scrollPos - halfWin - fade - 1);
+    const hi = Math.ceil (scrollPos + halfWin + fade + 1);
+
+    for (let k = hi; k >= lo; k--) {
+      if (k < firstBar || k > lastBar) continue;
+      const slot = k - scrollPos;
+      const edge = Math.abs(slot) - halfWin;
+      let f = edge <= 0 ? 1 : 1 - edge / fade;
+      if (f <= 0.001) continue;
+      f = Math.max(0, Math.min(1, f));
+
+      let grow;
+      if (scrolling) {
+        grow = this.TRD_EDGE_SCALE + (1 - this.TRD_EDGE_SCALE) * f;
+      } else {
+        const j = revealBars.indexOf(k);
+        if (j === -1) continue;
+        grow = revLocal(j);
+        f = 1;
+      }
+      if (grow <= 0.001) continue;
+
+      const hRem = WAVE[((k % WLEN) + WLEN) % WLEN];
+      const hy = this._rem * hRem * 0.5 * grow;
+      if (hy <= 0.001) continue;
+      const baseX = cx + slot * dxScreen;
+      const baseY = cy - slot * dyScreen;
+      const cyp = baseY - hy*ct;
+      this._trdDrawBox(baseX, cyp, hx, hy, hz, scale, f);
     }
 
-    this._scanCurrencyToTarget();
-    this._drawFgEased(0);
+    fCtx.restore();
+  }
+
+  _drawTrading() {
+    this._trdRenderScene();
+
+    const { W, H, DPR, COLS, ROWS, STEP } = this;
+    const data = this.fCtx.getImageData(0,0,W*DPR,H*DPR).data;
+    const stride = Math.round(W * DPR);
+    const half = STEP/2;
+    const [lr, lg, lb] = this.LINE_COLOR.split(',').map(Number);
+
+    for (let c=0;c<COLS;c++){
+      const sx = this.colXCache[c]+half;
+      const px = Math.min(W*DPR-1, Math.max(0,(sx*DPR)|0));
+      for (let r=0;r<ROWS;r++){
+        const sy = this.rowYCache[r]+half;
+        const py = Math.min(H*DPR-1,Math.max(0,(sy*DPR)|0));
+        const idx = (py*stride+px)*4;
+        const alpha = data[idx+3]/255;            // mask-edge fade
+        if (alpha <= 0.02) continue;
+        const shade = data[idx]/255;
+        const sizeFrac = this.TRD_LIGHT_SIZE + (1 - this.TRD_LIGHT_SIZE) * shade;
+        const sz = this.FG_MAX * sizeFrac * (0.6 + 0.4*alpha);
+        this.ctx.fillStyle = `rgba(${lr},${lg},${lb},${shade*alpha})`;
+        this.ctx.fillRect(this.colXCache[c]+half-sz/2, this.rowYCache[r]+half-sz/2, sz, sz);
+      }
+    }
+  }
+
+  // =========================================================================
+  // FOREGROUND: TREASURY MANAGEMENT — segmented ring (flip-wave + spin)
+  //   reveal (slices scale in, staggered anti-cw from left-middle) → middle
+  //   (flip wave rolls each slice a full turn about its tangent axis, staggered,
+  //   WHILE the whole ring spins) → exit (slices scale out). Orthographic,
+  //   tilted + rolled. State in this.treasuryState, driven by animations.js.
+  // =========================================================================
+
+  // rotate about Y (yaw) then X (tilt); orthographic — no perspective divide.
+  _treRotate3(p, ry, rx) {
+    const cy = Math.cos(ry), sy = Math.sin(ry);
+    const x =  p[0]*cy + p[2]*sy;
+    const z = -p[0]*sy + p[2]*cy;
+    const y =  p[1];
+    const cx2 = Math.cos(rx), sx2 = Math.sin(rx);
+    return [ x, y*cx2 - z*sx2, y*sx2 + z*cx2 ];
+  }
+  // Rodrigues rotation of p about unit axis ax by angle th.
+  _treRotAxis(p, ax, th) {
+    const c = Math.cos(th), s = Math.sin(th), k = 1 - c;
+    const [x,y,z] = p, [ux,uy,uz] = ax;
+    const dot = x*ux + y*uy + z*uz;
+    return [
+      x*c + (uy*z - uz*y)*s + ux*dot*k,
+      y*c + (uz*x - ux*z)*s + uy*dot*k,
+      z*c + (ux*y - uy*x)*s + uz*dot*k,
+    ];
+  }
+
+  _treRenderScene() {
+    const { W, H, DPR } = this;
+    const fc = this.fCtx;
+    fc.setTransform(1,0,0,1,0,0);
+    fc.clearRect(0,0,W*DPR,H*DPR);
+    fc.save();
+    fc.scale(DPR,DPR);
+
+    const st = this.treasuryState;
+    const R  = this._rem * this.TRE_DISK_REM * 0.5;
+    const rI = this._rem * this.TRE_HOLE_REM * 0.5;
+    const halfT = this._rem * this.TRE_THICK_REM * 0.5;
+    const cx = W/2 + this._rem * this.TRE_OFFSET_X_REM;
+    const cy = H/2 + this._rem*1.2 + this._rem * this.TRE_OFFSET_Y_REM;
+    const ry = this.TRE_YAW_DEG * Math.PI/180;
+    const rx = this.TRE_TILT_DEG * Math.PI/180;
+    const roll = this.TRE_ROLL_DEG * Math.PI/180;
+    const cr = Math.cos(roll), sr = Math.sin(roll);
+
+    const proj = (p) => {
+      const r = this._treRotate3(p, ry, rx);
+      const x = cx + r[0], y = cy + r[1];
+      const dx = x - cx, dy = y - cy;
+      return { x: cx + dx*cr - dy*sr, y: cy + dx*sr + dy*cr, z: r[2] };
+    };
+
+    const NS  = this.TRE_SEGMENTS;
+    const SPIN = -st.spin * Math.PI*2 * this.TRE_SPIN_TURNS;   // counter-clockwise
+    const gap = this.TRE_GAP_DEG * Math.PI/180;
+    const full = Math.PI*2 / NS;
+    const arc  = full - gap;
+    const ASEG = Math.max(2, Math.round(this.TRE_NSEG / NS));
+
+    const faces = [];
+    const addFace = (localPts, shade) => {
+      const sp = localPts.map(proj);
+      let zsum = 0; for (const q of sp) zsum += q.z;
+      faces.push({ pts: sp, shade, depth: zsum / sp.length });
+    };
+
+    const stagger = (gp, j, ov) => {
+      const span = 1 / (NS - (NS-1)*ov);
+      const start = j * span * (1 - ov);
+      return Math.max(0, Math.min(1, (gp - start) / span));
+    };
+    const orderOf = (i) => {
+      const baseMid = i*full + gap*0.5 + arc*0.5;
+      let d = (baseMid - Math.PI); d = ((d % (Math.PI*2)) + Math.PI*2) % (Math.PI*2);
+      return (NS - Math.round(d / full)) % NS;     // 0 = left-middle, anti-cw
+    };
+    const sliceScale = (i) => {
+      const order = orderOf(i);
+      if (st.exit > 0.0001) return 1 - stagger(st.exit, order, this.TRE_STAGGER_OVL);
+      return stagger(st.reveal, order, this.TRE_STAGGER_OVL);
+    };
+    const flipAngleFor = (i) => {
+      if (st.flip <= 0.0001) return 0;
+      const order = orderOf(i);
+      const ov = this.TRE_FLIP_OVL;
+      const span = 1 / (NS - (NS-1)*ov);
+      const start = order * span * (1 - ov);
+      const local = (st.flip - start) / span;
+      if (local <= 0 || local >= 1) return 0;
+      return -local * this.TRE_FLIP_MAX * Math.PI/180;          // reversed direction
+    };
+
+    for (let i=0;i<NS;i++){
+      const sc = sliceScale(i);
+      if (sc <= 0.001) continue;
+      const a0 = i*full + gap*0.5 + SPIN;
+      const a1 = a0 + arc;
+      const aMid = (a0 + a1) / 2;
+      const rMid = (R + rI) / 2;
+      const cMidX = Math.cos(aMid)*rMid, cMidZ = Math.sin(aMid)*rMid;
+      const flipA = flipAngleFor(i);
+      const tax = [-Math.sin(aMid), 0, Math.cos(aMid)];
+      const Psc = (ang, rad, h) => {
+        const x = Math.cos(ang)*rad, z = Math.sin(ang)*rad;
+        let p = [ (x-cMidX)*sc, h*sc, (z-cMidZ)*sc ];
+        if (flipA !== 0) p = this._treRotAxis(p, tax, flipA);
+        return [ cMidX + p[0], p[1], cMidZ + p[2] ];
+      };
+
+      for (const [sign, shade] of [[1, this.TRE_SHADE_TOP], [-1, this.TRE_SHADE_BOTTOM]]) {
+        const pts = [];
+        for (let a=0;a<=ASEG;a++){ const ang=a0+(a1-a0)*a/ASEG; pts.push(Psc(ang,R,sign*halfT)); }
+        for (let a=ASEG;a>=0;a--){ const ang=a0+(a1-a0)*a/ASEG; pts.push(Psc(ang,rI,sign*halfT)); }
+        addFace(pts, shade);
+      }
+      for (let a=0;a<ASEG;a++){
+        const b0=a0+(a1-a0)*a/ASEG, b1=a0+(a1-a0)*(a+1)/ASEG;
+        addFace([Psc(b0,R,halfT),Psc(b1,R,halfT),Psc(b1,R,-halfT),Psc(b0,R,-halfT)], this.TRE_SHADE_RIM);
+        addFace([Psc(b0,rI,halfT),Psc(b1,rI,halfT),Psc(b1,rI,-halfT),Psc(b0,rI,-halfT)], this.TRE_SHADE_INNER);
+      }
+      addFace([Psc(a0,R,halfT),Psc(a0,rI,halfT),Psc(a0,rI,-halfT),Psc(a0,R,-halfT)], this.TRE_SHADE_END);
+      addFace([Psc(a1,R,halfT),Psc(a1,rI,halfT),Psc(a1,rI,-halfT),Psc(a1,R,-halfT)], this.TRE_SHADE_END);
+    }
+
+    faces.sort((A,B)=>B.depth - A.depth);
+    for (const f of faces){
+      const v = Math.max(0, Math.min(255, Math.round(f.shade*255)));
+      fc.fillStyle = `rgb(${v},${v},${v})`;
+      fc.beginPath();
+      fc.moveTo(f.pts[0].x, f.pts[0].y);
+      for (let i=1;i<f.pts.length;i++) fc.lineTo(f.pts[i].x, f.pts[i].y);
+      fc.closePath();
+      fc.fill();
+    }
+    fc.restore();
+  }
+
+  _drawTreasury() {
+    this._treRenderScene();
+
+    const { W, H, DPR, COLS, ROWS, STEP } = this;
+    const data = this.fCtx.getImageData(0,0,W*DPR,H*DPR).data;
+    const stride = Math.round(W * DPR);
+    const half = STEP/2;
+    const [lr, lg, lb] = this.LINE_COLOR.split(',').map(Number);
+
+    for (let c=0;c<COLS;c++){
+      const sx = this.colXCache[c]+half;
+      const px = Math.min(W*DPR-1, Math.max(0,(sx*DPR)|0));
+      for (let r=0;r<ROWS;r++){
+        const sy = this.rowYCache[r]+half;
+        const py = Math.min(H*DPR-1,Math.max(0,(sy*DPR)|0));
+        const idx = (py*stride+px)*4;
+        if (data[idx+3]/255 <= this.THRESHOLD) continue;
+        const shade = data[idx]/255;
+        const sizeFrac = this.TRE_LIGHT_SIZE + (1 - this.TRE_LIGHT_SIZE) * shade;
+        const sz = this.FG_MAX * sizeFrac;
+        this.ctx.fillStyle = `rgba(${lr},${lg},${lb},${shade})`;
+        this.ctx.fillRect(this.colXCache[c]+half-sz/2, this.rowYCache[r]+half-sz/2, sz, sz);
+      }
+    }
   }
 
   // =========================================================================
@@ -637,10 +1651,25 @@ class LineGrid {
     // ── Two independent scrub phases ──────────────────────────────────────
     // PHASE 1: globe disintegration driven solely by outroProgress
     this._disintegrate = Math.min(1, Math.max(0, this.outroProgress || 0));
-    // PHASE 2: bank accounts active once its own scrub starts
-    const bp = Math.min(1, Math.max(0, this.bankProgress || 0));
-    this.bankProgress = bp;
-    this.bankActive = bp > 0.001 || this._disintegrate >= 1;
+    // PHASE 2: bank accounts active once the globe is fully gone. The currency
+    // state (scale/flip/dissolve) is driven by the GSAP timeline in animations.js.
+    const cs = this.curState;
+    const curVisible = cs.scale > 0.001 && cs.dissolve < 0.999;
+    this.bankActive = curVisible || this._disintegrate >= 1;
+    // PHASE 3: digital asset cube active once its own state is in play.
+    const ds = this.damState;
+    this.damActive = (ds.reveal > 0.001 || ds.merge > 0.001) && ds.dissolve < 0.999;
+    // PHASE 4: PaveNet rings active once their own state is in play.
+    const ps = this.pnetState;
+    this.pnetActive = (ps.reveal > 0.001) && ps.dissolve < 0.999;
+    // PHASE 5: Trading & Markets active once its reveal starts. It ends by
+    // scrolling fully off (empty canvas), so it stays "active" the whole time;
+    // the empty result is just what it renders at scroll=1.
+    const tr = this.tradeState;
+    this.tradeActive = tr.reveal > 0.001;
+    // PHASE 6: Treasury Management active once reveal starts, until exit done.
+    const tm = this.treasuryState;
+    this.treasuryActive = tm.reveal > 0.001 && tm.exit < 0.999;
 
     // Mouse smoothing + velocity
     if (this.targetX >= 0) {
@@ -717,8 +1746,20 @@ class LineGrid {
       }
     }
 
-    // ── Foreground: globe (disintegrating) OR bank accounts ───────────────
-    if (this.bankActive) {
+    // ── Foreground priority: treasury → trade → pnet → cube → currency → globe
+    if (this.treasuryActive) {
+      if (this._fgTarget) for (let c = 0; c < COLS; c++) this.fgActive[c].fill(0);
+      this._drawTreasury();
+    } else if (this.tradeActive) {
+      if (this._fgTarget) for (let c = 0; c < COLS; c++) this.fgActive[c].fill(0);
+      this._drawTrading();
+    } else if (this.pnetActive) {
+      if (this._fgTarget) for (let c = 0; c < COLS; c++) this.fgActive[c].fill(0);
+      this._drawPaveNet();
+    } else if (this.damActive) {
+      if (this._fgTarget) for (let c = 0; c < COLS; c++) this.fgActive[c].fill(0);
+      this._drawDigitalAsset();
+    } else if (this.bankActive) {
       // Globe gone — render bank accounts dollar/currency
       // Clear any lingering globe fg so it doesn't ease back in
       if (this._fgTarget) for (let c = 0; c < COLS; c++) this.fgActive[c].fill(0);
@@ -760,4 +1801,35 @@ const grid1 = new LineGrid('#section-1', {
   bgColor:     '--dark',
   lineColor:   '--white',
   markerColor: '#77DD84',
+  // Digital Asset cube sizes (rem)
+  damCubeRem:  4.2,
+  damMiniRem:  1.51,
+  // PaveNet ring sizes (−20% again from 5.52 / 1.1), gap restored
+  pnetDiskRem:  4.42,
+  pnetThickRem: 0.88,
+  pnetRingGap:  0.34,
+  pnetSpinTurns: 0.5,   // 180° rotations (was 360°)
+  pnetYawDeg:    0,     // dead-on at rest (no tilt)
+  pnetSides:     6,     // hexagonal rings (use high number, e.g. 64, for circles)
+  // Trading & Markets — scaled 30% smaller (bars + diagonal spacing × 0.7)
+  trdBarWidthRem: 0.98,
+  trdStepXRem:    1.47,
+  trdStepYRem:    0.735,
+  trdMinHRem:     1.12,
+  trdMaxHRem:     2.94,
+  trdOffsetXRem:  0.8,   // nudge right to centre
+  trdOffsetYRem:  0.8,   // nudge down to centre
+  trdChartBars:   12,    // 2 waves (2 × 6-bar cycle), ends on a trough
+  trdScrollBars:  15,    // total travel so the tail clears the left edge
+  // Treasury Management — segmented ring (−35% → × 0.65)
+  treDiskRem:    5.85,
+  treHoleRem:    3.25,
+  treThickRem:   0.78,
+  treTiltDeg:    30,
+  treRollDeg:    -20,
+  treSegments:   10,
+  treGapDeg:     6,
+  treSpinTurns:  0.5,    // ring spins 180° during the middle
+  treFlipMax:    360,    // each slice rolls a full turn (flip wave)
+  treFlipOvl:    0.6,
 });
