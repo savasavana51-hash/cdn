@@ -87,12 +87,20 @@ window.addEventListener('load', () => {
         scrub:   true,
       }
     })
-    .to('.cr-blocks.left, .cr-blocks.right', {
-      width: '1.4rem',
+    .to('.cr-blocks.left', {
+      width: '11rem',
       ease:  'power1.inOut',
     }, 0)
+    .to('.cr-blocks.right', {
+      width: '1.4rem',
+      ease:   'power1.inOut',
+    }, 0)
+    .to('.cr-blocks.top', {
+      height: '3.2rem',
+      ease:   'power1.inOut',
+    }, 0)
     .to('.cr-blocks.bottom', {
-      height: '7.4rem',
+      height: '9rem',
       ease:   'power1.inOut',
     }, 0);
   }
@@ -681,6 +689,37 @@ window.addEventListener('load', () => {
   // Item widths change on resize — reposition the dot under the active item.
   window.addEventListener('resize', () => moveDotTo(activeNavIndex));
 
+  // ── Trust & operations — isometric cube field reveal ──────────────────────
+  // Scrubbed on .pn-trust-graphic-scroll: top hits viewport bottom → bottom hits
+  // viewport bottom. Drives grid1.trustState.reveal 0→1; cubes scale up staggered
+  // from the centre outward (the canvas renders it).
+  if (document.querySelector('.pn-trust-graphic-scroll')) {
+    ScrollTrigger.create({
+      trigger: '.pn-trust-graphic-scroll',
+      start:   'top bottom',
+      end:     'bottom bottom',
+      scrub:   true,
+      onUpdate: (self) => { grid1.trustState.reveal = self.progress; },
+    });
+  }
+
+  // ── Footer content block — y 10% → -10% on .footer scroll (scrub) ──────────
+  if (document.querySelector('.footer') && document.querySelector('.footer-content-block')) {
+    gsap.fromTo('.footer-content-block',
+      { y: '-60%' },
+      {
+        y: '50%',
+        ease: 'none',
+        scrollTrigger: {
+          trigger: '.footer',
+          start:   'top bottom',
+          end:     'bottom bottom',
+          scrub:   true,
+        },
+      }
+    );
+  }
+
   // ── Scroll progress tracker ───────────────────────────────────────────────
 
   gsap.set('.scroll-progress-thumb', { scaleX: 0 });
@@ -696,9 +735,11 @@ window.addEventListener('load', () => {
     },
   });
 
-  // ── Nav hide on scroll-down, show on scroll-up ─────────────────────────────
   /*
+  // ── Nav hide on scroll-down, show on scroll-up ─────────────────────────────
+  
   const pnNav = document.querySelector('.pn-nav');
+  const pn2Heading = document.querySelector('.pn-product-heading');
 
   if (pnNav) {
     ScrollTrigger.create({
@@ -708,8 +749,11 @@ window.addEventListener('load', () => {
         // direction: 1 = scrolling down, -1 = scrolling up
         if (self.direction === 1) pnNav.classList.add('hide');
         else                      pnNav.classList.remove('hide');
+        if (self.direction === 1) pn2Heading.classList.remove('down');
+        else                      pn2Heading.classList.add('down');
       },
     });
-  } */
+  }
 
+  */
 });
