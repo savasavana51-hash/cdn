@@ -296,6 +296,47 @@ class LineGrid {
     this.TRE_OFFSET_Y_REM  = options.treOffsetYRem !== undefined ? options.treOffsetYRem : 0;
     this.treasuryActive    = false;
 
+    // ── Programmable Infrastructure — 3D node network (reveal → rotate → exit) ──
+    //   A hexagonal graph: centre hub + 6 ring nodes at alternating heights,
+    //   connected by thin 3D strut-beams. Reveal: nodes scale in (staggered) then
+    //   struts grow. Middle: the whole network rotates. Exit: struts retract,
+    //   nodes scale out. Iso 3-face view. State driven by animations.js (.infra).
+    this.infraState        = { reveal: 0, strut: 0, rot: 0, exit: 0 };
+    this.INF_NODE_REM      = options.infNodeRem    !== undefined ? options.infNodeRem    : 0.9;
+    this.INF_STRUT_REM     = options.infStrutRem   !== undefined ? options.infStrutRem   : 0.09;
+    this.INF_LAYOUT_REM    = options.infLayoutRem  !== undefined ? options.infLayoutRem  : 3.2;
+    this.INF_BASE_YAW_DEG  = options.infBaseYawDeg !== undefined ? options.infBaseYawDeg : 45;
+    this.INF_TILT_DEG      = options.infTiltDeg    !== undefined ? options.infTiltDeg    : 35;
+    this.INF_SPIN_TURNS    = options.infSpinTurns  !== undefined ? options.infSpinTurns  : 1;
+    this.INF_REVEAL_OVL    = options.infRevealOvl  !== undefined ? options.infRevealOvl  : 0.55;
+    this.INF_EXIT_OVL      = options.infExitOvl    !== undefined ? options.infExitOvl    : 0.55;
+    this.INF_SHADE_TOP     = options.infShadeTop   !== undefined ? options.infShadeTop   : 0.55;
+    this.INF_SHADE_LEFT    = options.infShadeLeft  !== undefined ? options.infShadeLeft  : 0.35;
+    this.INF_SHADE_RIGHT   = options.infShadeRight !== undefined ? options.infShadeRight : 1.0;
+    this.INF_STRUT_SHADE   = options.infStrutShade !== undefined ? options.infStrutShade : 0.5;
+    this.INF_LIGHT_SIZE    = options.infLightSize  !== undefined ? options.infLightSize  : 0.7;
+    this.INF_OFFSET_X_REM  = options.infOffsetXRem !== undefined ? options.infOffsetXRem : 0;
+    this.INF_OFFSET_Y_REM  = options.infOffsetYRem !== undefined ? options.infOffsetYRem : 0;
+    this.infraActive       = false;
+    // Hex node layout: centre hub + 6 pointy-top ring nodes at alternating heights.
+    this._infNodes = (() => {
+      const pts = [[0,0,0]];
+      const ringN = 6, Rr = 1.0;
+      for (let i=0;i<ringN;i++){
+        const a = i/ringN*Math.PI*2 + Math.PI/6;
+        const y = (i%2===0 ? 0.45 : -0.45);
+        pts.push([Math.cos(a)*Rr, y, Math.sin(a)*Rr]);
+      }
+      return pts;
+    })();
+    // Edges: hub spokes + hex ring loop.
+    this._infEdges = (() => {
+      const e = [];
+      for (let i=1;i<=6;i++) e.push([0, i]);
+      for (let i=1;i<=6;i++) e.push([i, i%6 + 1]);
+      return e;
+    })();
+
     // Disintegration tuning (radial dissolve, grid-quantized hop + fade)
     //   Cells dissolve in order of radial distance from globe centre, then
     //   hop OUTWARD cell-by-cell in whole STEP increments (always on-grid).
@@ -1637,6 +1678,165 @@ class LineGrid {
   }
 
   // =========================================================================
+  // FOREGROUND: PROGRAMMABLE INFRASTRUCTURE — 3D node network
+  //   reveal (nodes scale in staggered, then struts grow) → middle (whole net
+  //   rotates) → exit (struts retract, nodes scale out). Nodes are cubes, struts
+  //   are thin 3D beams. Iso 3-face view. State in this.infraState.
+  // =========================================================================
+
+  _infRotY(p, c, s) { return [ p[0]*c + p[2]*s, p[1], -p[0]*s + p[2]*c ]; }
+  _infRotX(p, c, s) { return [ p[0], p[1]*c - p[2]*s, p[1]*s + p[2]*c ]; }
+
+  _infProject(p, ry, rx, cx, cy, scale) {
+    let q = this._infRotY(p, Math.cos(ry), Math.sin(ry));
+    q = this._infRotX(q, Math.cos(rx), Math.sin(rx));
+    return { x: cx + q[0]*scale, y: cy + q[1]*scale, z: q[2] };
+  }
+
+  _infAddBox(scene, center, hx, hy, hz, ry, rx, cx, cy, scale, shadeSet) {
+    const [Cx,Cy,Cz] = center;
+    const corners = [
+      [-hx,-hy,-hz],[ hx,-hy,-hz],[ hx,-hy, hz],[-hx,-hy, hz],
+      [-hx, hy,-hz],[ hx, hy,-hz],[ hx, hy, hz],[-hx, hy, hz],
+    ].map(p => this._infProject([p[0]+Cx, p[1]+Cy, p[2]+Cz], ry, rx, cx, cy, scale));
+    const faces = [
+      { idx:[0,1,2,3], n:[0,-1,0] },
+      { idx:[4,7,6,5], n:[0, 1,0] },
+      { idx:[0,3,7,4], n:[-1,0,0] },
+      { idx:[1,5,6,2], n:[ 1,0,0] },
+      { idx:[3,2,6,7], n:[0,0, 1] },
+      { idx:[0,4,5,1], n:[0,0,-1] },
+    ];
+    const c1=Math.cos(ry), s1=Math.sin(ry), c2=Math.cos(rx), s2=Math.sin(rx);
+    for (const f of faces){
+      let rn = this._infRotY(f.n, c1, s1); rn = this._infRotX(rn, c2, s2);
+      if (rn[2] >= -0.001) continue;
+      let shade;
+      if (shadeSet.flat !== undefined) shade = shadeSet.flat;
+      else if (rn[1] < -0.5) shade = shadeSet.top;
+      else if (rn[0] > 0) shade = shadeSet.right;
+      else shade = shadeSet.left;
+      const q = f.idx.map(i => corners[i]);
+      const depth = (q[0].z+q[1].z+q[2].z+q[3].z)/4;
+      scene.push({ pts:q, shade, depth });
+    }
+  }
+
+  _infAddBeam(scene, A, B, t, frac, ry, rx, cx, cy, scale, shade) {
+    const ax=A[0], ay=A[1], az=A[2];
+    const bx=ax+(B[0]-ax)*frac, by=ay+(B[1]-ay)*frac, bz=az+(B[2]-az)*frac;
+    const mid=[(ax+bx)/2,(ay+by)/2,(az+bz)/2];
+    const dx=bx-ax, dy=by-ay, dz=bz-az;
+    const len=Math.hypot(dx,dy,dz) || 1e-6;
+    const u=[dx/len,dy/len,dz/len];
+    let ref = Math.abs(u[1])<0.9 ? [0,1,0] : [1,0,0];
+    let v=[u[1]*ref[2]-u[2]*ref[1], u[2]*ref[0]-u[0]*ref[2], u[0]*ref[1]-u[1]*ref[0]];
+    const vl=Math.hypot(v[0],v[1],v[2])||1; v=[v[0]/vl,v[1]/vl,v[2]/vl];
+    let w=[u[1]*v[2]-u[2]*v[1], u[2]*v[0]-u[0]*v[2], u[0]*v[1]-u[1]*v[0]];
+    const hl=len/2;
+    const corner = (su,sv,sw) => [
+      mid[0]+u[0]*su*hl+v[0]*sv*t+w[0]*sw*t,
+      mid[1]+u[1]*su*hl+v[1]*sv*t+w[1]*sw*t,
+      mid[2]+u[2]*su*hl+v[2]*sv*t+w[2]*sw*t,
+    ];
+    const C = [
+      corner(-1,-1,-1),corner(1,-1,-1),corner(1,-1,1),corner(-1,-1,1),
+      corner(-1,1,-1),corner(1,1,-1),corner(1,1,1),corner(-1,1,1),
+    ].map(p=>this._infProject(p, ry, rx, cx, cy, scale));
+    const faces=[[0,1,2,3],[4,7,6,5],[0,3,7,4],[1,5,6,2],[3,2,6,7],[0,4,5,1]];
+    for (const idx of faces){
+      const q=idx.map(i=>C[i]);
+      const area=(q[1].x-q[0].x)*(q[2].y-q[0].y)-(q[1].y-q[0].y)*(q[2].x-q[0].x);
+      if (area<=0) continue;
+      const depth=(q[0].z+q[1].z+q[2].z+q[3].z)/4;
+      scene.push({ pts:q, shade, depth });
+    }
+  }
+
+  _infStagger(gp, j, n, ov){
+    const span = 1/(n-(n-1)*ov);
+    const start = j*span*(1-ov);
+    return Math.max(0, Math.min(1, (gp-start)/span));
+  }
+
+  _infRenderScene() {
+    const { W, H, DPR } = this;
+    const fc = this.fCtx;
+    fc.setTransform(1,0,0,1,0,0);
+    fc.clearRect(0,0,W*DPR,H*DPR);
+    fc.save();
+    fc.scale(DPR,DPR);
+
+    const st = this.infraState;
+    const cx = W/2 + this._rem*this.INF_OFFSET_X_REM;
+    const cy = H/2 + this._rem*1.2 + this._rem*this.INF_OFFSET_Y_REM;
+    const scale = this._rem * this.INF_LAYOUT_REM;
+    const ry = this.INF_BASE_YAW_DEG*Math.PI/180 + st.rot * Math.PI*2 * this.INF_SPIN_TURNS;
+    const rx = this.INF_TILT_DEG*Math.PI/180;
+    const node = this._rem*this.INF_NODE_REM*0.5 / scale;
+    const t = this._rem*this.INF_STRUT_REM*0.5 / scale;
+    const N = this._infNodes.length;
+
+    const nodeScl = (i) => {
+      if (st.exit>0.0001) return 1 - this._infStagger(st.exit, i, N, this.INF_EXIT_OVL);
+      return this._infStagger(st.reveal, i, N, this.INF_REVEAL_OVL);
+    };
+
+    const scene = [];
+    // struts first
+    for (const [a,b] of this._infEdges){
+      if (nodeScl(a)<=0.01 || nodeScl(b)<=0.01) continue;
+      this._infAddBeam(scene, this._infNodes[a], this._infNodes[b], t, st.strut, ry, rx, cx, cy, scale, this.INF_STRUT_SHADE);
+    }
+    // nodes
+    for (let i=0;i<N;i++){
+      const s=nodeScl(i);
+      if (s<=0.01) continue;
+      const hs = node*s;
+      this._infAddBox(scene, this._infNodes[i], hs, hs, hs, ry, rx, cx, cy, scale,
+        { top:this.INF_SHADE_TOP, left:this.INF_SHADE_LEFT, right:this.INF_SHADE_RIGHT });
+    }
+
+    scene.sort((A,B)=>B.depth-A.depth);
+    for (const f of scene){
+      const v = Math.max(0,Math.min(255,Math.round(f.shade*255)));
+      fc.fillStyle = `rgb(${v},${v},${v})`;
+      fc.beginPath();
+      fc.moveTo(f.pts[0].x, f.pts[0].y);
+      for (let i=1;i<f.pts.length;i++) fc.lineTo(f.pts[i].x, f.pts[i].y);
+      fc.closePath();
+      fc.fill();
+    }
+    fc.restore();
+  }
+
+  _drawInfra() {
+    this._infRenderScene();
+
+    const { W, H, DPR, COLS, ROWS, STEP } = this;
+    const data = this.fCtx.getImageData(0,0,W*DPR,H*DPR).data;
+    const stride = Math.round(W * DPR);
+    const half = STEP/2;
+    const [lr, lg, lb] = this.LINE_COLOR.split(',').map(Number);
+
+    for (let c=0;c<COLS;c++){
+      const sx = this.colXCache[c]+half;
+      const px = Math.min(W*DPR-1, Math.max(0,(sx*DPR)|0));
+      for (let r=0;r<ROWS;r++){
+        const sy = this.rowYCache[r]+half;
+        const py = Math.min(H*DPR-1,Math.max(0,(sy*DPR)|0));
+        const idx = (py*stride+px)*4;
+        if (data[idx+3]/255 <= this.THRESHOLD) continue;
+        const shade = data[idx]/255;
+        const sizeFrac = this.INF_LIGHT_SIZE + (1 - this.INF_LIGHT_SIZE) * shade;
+        const sz = this.FG_MAX * sizeFrac;
+        this.ctx.fillStyle = `rgba(${lr},${lg},${lb},${shade})`;
+        this.ctx.fillRect(this.colXCache[c]+half-sz/2, this.rowYCache[r]+half-sz/2, sz, sz);
+      }
+    }
+  }
+
+  // =========================================================================
   // MAIN LOOP
   // =========================================================================
 
@@ -1670,6 +1870,9 @@ class LineGrid {
     // PHASE 6: Treasury Management active once reveal starts, until exit done.
     const tm = this.treasuryState;
     this.treasuryActive = tm.reveal > 0.001 && tm.exit < 0.999;
+    // PHASE 7: Programmable Infrastructure active once reveal starts, until exit.
+    const inf = this.infraState;
+    this.infraActive = inf.reveal > 0.001 && inf.exit < 0.999;
 
     // Mouse smoothing + velocity
     if (this.targetX >= 0) {
@@ -1746,8 +1949,11 @@ class LineGrid {
       }
     }
 
-    // ── Foreground priority: treasury → trade → pnet → cube → currency → globe
-    if (this.treasuryActive) {
+    // ── Foreground priority: infra → treasury → trade → pnet → cube → currency → globe
+    if (this.infraActive) {
+      if (this._fgTarget) for (let c = 0; c < COLS; c++) this.fgActive[c].fill(0);
+      this._drawInfra();
+    } else if (this.treasuryActive) {
       if (this._fgTarget) for (let c = 0; c < COLS; c++) this.fgActive[c].fill(0);
       this._drawTreasury();
     } else if (this.tradeActive) {
@@ -1832,4 +2038,11 @@ const grid1 = new LineGrid('#section-1', {
   treSpinTurns:  0.5,    // ring spins 180° during the middle
   treFlipMax:    360,    // each slice rolls a full turn (flip wave)
   treFlipOvl:    0.6,
+  // Programmable Infrastructure — node network (−20% → × 0.8)
+  infNodeRem:    0.72,
+  infStrutRem:   0.072,
+  infLayoutRem:  2.56,
+  infBaseYawDeg: 45,
+  infTiltDeg:    35,
+  infSpinTurns:  1,      // network does one full turn in the middle
 });
