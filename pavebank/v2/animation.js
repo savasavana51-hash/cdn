@@ -74,8 +74,29 @@ window.addEventListener('load', () => {
     onLeave:     () => { grid1.GLOBE_SPEED = BASE_SPEED; },
     onLeaveBack: () => { grid1.GLOBE_SPEED = BASE_SPEED; },
   });
-  
-  
+
+  // ── Trust & operations — cr-blocks resize ──────────────────────────────────
+  // Scrubbed on .pn-trust-operations: left/right blocks widen to 1.4rem and the
+  // bottom block grows to 6.2rem in height.
+  if (document.querySelector('.pn-trust-operations')) {
+    gsap.timeline({
+      scrollTrigger: {
+        trigger: '.pn-trust-operations',
+        start:   'top bottom',
+        end:     'top top',
+        scrub:   true,
+      }
+    })
+    .to('.cr-blocks.left, .cr-blocks.right', {
+      width: '1.4rem',
+      ease:  'none',
+    }, 0)
+    .to('.cr-blocks.bottom', {
+      height: '7.4rem',
+      ease:   'none',
+    }, 0);
+  }
+
   // ── Hero content exit ──────────────────────────────────────────────────────
   // Slide .pn-hero-content down as the hero scrolls away.
 
@@ -255,7 +276,7 @@ window.addEventListener('load', () => {
 
   // Middle step builders — each gets (state, tl, holdDur, flipDur).
   const mergeStep = (state, tl, holdDur, flipDur) =>
-    tl.to(state, { merge: 1, duration: flipDur, ease: 'power2.inOut', delay: holdDur });
+    tl.to(state, { merge: 1, duration: flipDur, ease: 'none', delay: holdDur });
   // A single 90° spin; `target` is the absolute rotation in radians.
   const spinStep = (target) => (state, tl, holdDur, flipDur) =>
     tl.to(state, { rot: target, duration: flipDur, ease: 'power2.inOut', delay: holdDur });
@@ -388,6 +409,40 @@ window.addEventListener('load', () => {
     ],
   });
 
+  // ── Programmable Infrastructure — node network (.pn-product-scroll.infra) ───
+  // reveal (nodes scale in staggered, struts grow alongside) → middle (the whole
+  // network rotates) → exit (struts retract, nodes scale out). Drives
+  // grid1.infraState; the canvas renders it.
+  const infraState = grid1.infraState;
+
+  const infRotateStep = (state, tl, holdDur, flipDur) =>
+    tl.to(state, { rot: 1, duration: flipDur, ease: 'power1.inOut', delay: holdDur });
+
+  buildProductSequence({
+    trigger: '.pn-product-scroll.infra',
+    state:   infraState,
+    revealStartVh: 0.0,
+    revealEndVh:   0.30,
+    exitStartVh:   0.30,
+    exitEndVh:     0.0,
+    holdVh:        0.10,
+    revealEase: 'power2.out',
+    exitEase:   'power2.in',
+    onReveal: (s, p) => {
+      s.reveal = p;
+      s.strut  = Math.max(0, (p - 0.4) / 0.6);   // struts grow over the last 60% of reveal
+      s.rot    = 0;
+      s.exit   = 0;
+    },
+    onExit: (s, p) => {
+      s.exit  = p;            // nodes scale out (staggered)
+      s.strut = 1 - p;        // struts retract
+    },
+    steps: [
+      infRotateStep,          // whole network rotates
+    ],
+  });
+
   // ── Product scroller — heading words + nav items ──────────────────────────
 
   const heading2 = document.querySelector('.pn-heading-2');
@@ -424,6 +479,30 @@ window.addEventListener('load', () => {
       opacity: 1,
       stagger: 0.1,
       ease:    'none',
+    }, '<+=50%');
+
+    // ── Product outro — mirror of the intro, exiting on .pn-product-outro ──────
+    // Same stagger + overlap as the intro, reversed: nav items fade out first,
+    // then the heading words stagger out (opacity 1→0, words drop y 0%→10%).
+    const tlOut = gsap.timeline({
+      scrollTrigger: {
+        trigger: '.pn-product-outro',
+        start:   'top bottom',
+        end:     'top 50%',
+        scrub:   true,
+      }
+    });
+
+    tlOut.to(navItems, {
+      opacity: 0,
+      stagger: 0.1,
+      ease:    'none',
+    }, 0)
+    .to(split.words, {
+      opacity: 0,
+      y:       '10%',
+      stagger: 0.2,
+      ease:    'circ.in',
     }, '<+=50%');
 
   }
@@ -477,6 +556,8 @@ window.addEventListener('load', () => {
     moveDotTo(index, true);
   }
 
+  const lastIndex = productScrolls.length - 1;
+
   productScrolls.forEach((section, i) => {
     ScrollTrigger.create({
       trigger: section,
@@ -484,6 +565,17 @@ window.addEventListener('load', () => {
       end:     '100% bottom',
       onEnter:     () => activateSection(i),
       onEnterBack: () => activateSection(i),
+      onLeave: () => {
+        // Scrolled down past this section's end. For the LAST item, mirror the
+        // first item's intro: deactivate its nav and scale the dot away.
+        if (i === lastIndex) {
+          if (navWrappers[i]) navWrappers[i].classList.remove('active');
+          if (navDot) {
+            dotIntroDone = false;
+            gsap.to(navDot, { scale: 0, duration: 0.8, ease: 'expo.out' });
+          }
+        }
+      },
       onLeaveBack: () => {
         // Scrolled back up above this section — remove its active class.
         if (navWrappers[i]) navWrappers[i].classList.remove('active');
