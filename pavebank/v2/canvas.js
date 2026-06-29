@@ -21,6 +21,8 @@ const LINEGRID_DEFAULTS = {
   waveSpeed:   0.3,
   threshold:   0.5,
   trailLen:    24,
+  trailGreen:     '#77DD84',  // colour the trail blends toward at high speed
+  trailGreenVel:  0.45,       // velStrength at which the blend reaches full green
   bgColor:     '#222222',
   lineColor:   '#f5f5f5',
   dpr:         Math.min(window.devicePixelRatio || 1, 2),
@@ -52,7 +54,12 @@ const ISO_SPAN = (() => {
 class LineGrid {
   constructor(container, options = {}) {
     this.container = typeof container === 'string' ? document.querySelector(container) : container;
+    if (!this.container) return;   // element not on this page — bail quietly
     const cfg      = Object.assign({}, LINEGRID_DEFAULTS, options);
+
+    // Canvas mode: 'globe' (default — globe + products) or 'empty' (background
+    // grid + hover only).
+    this.MODE = options.mode || 'globe';
 
     this.PIXEL_REM     = cfg.pixelRem;
     this.STEP_REM      = cfg.stepRem;
@@ -69,6 +76,8 @@ class LineGrid {
     this.WAVE_SPEED    = cfg.waveSpeed;
     this.THRESHOLD     = cfg.threshold;
     this.TRAIL_LEN     = cfg.trailLen;
+    this.TRAIL_GREEN     = this._hexToRgb(cfg.trailGreen || '#77DD84');  // velocity trail accent
+    this.TRAIL_GREEN_VEL = cfg.trailGreenVel !== undefined ? cfg.trailGreenVel : 0.45;
     this.BG_OPACITY    = cfg.bgOpacity;
 
     this._bgVar   = options.bgColor  && options.bgColor.startsWith('--')  ? options.bgColor  : null;
@@ -337,6 +346,38 @@ class LineGrid {
       return e;
     })();
 
+    // ── Trust & Operations — isometric cube field (reveal staggered from centre)
+    //   A hexagonal field of true-iso cubes packed corner-to-corner (diamond gaps
+    //   show). Reveal scales each cube up in place, staggered by distance from the
+    //   centre cube → ripples outward. State in this.trustState, driven by a
+    //   scrubbed ScrollTrigger in animations.js (.pn-trust-graphic-scroll).
+    this.trustState        = { reveal: 0 };
+    this.TRU_CUBE_REM      = options.truCubeRem    !== undefined ? options.truCubeRem    : 1.6;  // cube edge
+    this.TRU_SCALE         = options.truScale      !== undefined ? options.truScale      : 1.0;  // master scale of whole field
+    this.TRU_HEIGHT_FRAC   = options.truHeightFrac !== undefined ? options.truHeightFrac : 1.0;  // pillar height / edge
+    this.TRU_RINGS         = options.truRings      !== undefined ? options.truRings      : 3;    // hex rings out
+    this.TRU_REVEAL_OVL    = options.truRevealOvl  !== undefined ? options.truRevealOvl  : 0.6;  // ring-to-ring overlap
+    this.TRU_SHADE_TOP     = options.truShadeTop   !== undefined ? options.truShadeTop   : 0.62;
+    this.TRU_SHADE_LEFT    = options.truShadeLeft  !== undefined ? options.truShadeLeft  : 0.42;
+    this.TRU_SHADE_RIGHT   = options.truShadeRight !== undefined ? options.truShadeRight : 0.20;
+    this.TRU_LIGHT_SIZE    = options.truLightSize  !== undefined ? options.truLightSize  : 0.7;
+    // Position as a fraction of canvas size from centre. Negative = left / up.
+    //   truOffsetX: -0.3 → 30% of canvas width to the LEFT
+    //   truOffsetY: -0.3 → 30% of canvas height UP
+    this.TRU_OFFSET_X      = options.truOffsetX    !== undefined ? options.truOffsetX    : 0;
+    this.TRU_OFFSET_Y      = options.truOffsetY    !== undefined ? options.truOffsetY    : 0;
+    this.trustActive       = false;
+    // Corner-touch lattice cells (axial hex envelope), with distance for stagger.
+    this._truCells = (() => {
+      const cells = [];
+      const R = this.TRU_RINGS;
+      for (let i=-R;i<=R;i++) for (let j=-R;j<=R;j++) {
+        if (Math.abs(i + j) > R) continue;       // hex envelope
+        cells.push({ i, j });
+      }
+      return cells;
+    })();
+
     // Disintegration tuning (radial dissolve, grid-quantized hop + fade)
     //   Cells dissolve in order of radial distance from globe centre, then
     //   hop OUTWARD cell-by-cell in whole STEP increments (always on-grid).
@@ -368,7 +409,7 @@ class LineGrid {
 
     window.addEventListener('load', () => {
       this.resize();
-      this._initGlobe();
+      if (this.MODE === 'globe') this._initGlobe();
       this._rafId = requestAnimationFrame((ts) => this._tick(ts));
       LineGrid._instances.add(this);
     });
@@ -1837,6 +1878,129 @@ class LineGrid {
   }
 
   // =========================================================================
+  // FOREGROUND: TRUST & OPERATIONS — isometric cube field
+  //   A hexagonal field of true-iso cubes packed corner-to-corner. Reveal scales
+  //   each cube up in place, staggered by distance from the centre → ripples
+  //   outward. State in this.trustState, driven by a scrubbed ScrollTrigger.
+  // =========================================================================
+
+  // Draw one straight-on iso cube directly in screen space (3 visible faces).
+  //   (sx,sy) = footprint anchor (middle vertex); dx,dy = top-rhombus half-
+  //   diagonals; hpx = pillar height. Pushes faces with a depth key.
+  _truAddCube(scene, sx, sy, dx, dy, hpx, depth, green) {
+    const top    = sy - hpx;
+    const Ttop   = { x: sx,      y: top };
+    const Tright = { x: sx + dx, y: top + dy };
+    const Tbot   = { x: sx,      y: top + 2*dy };
+    const Tleft  = { x: sx - dx, y: top + dy };
+    const Bbot   = { x: sx,      y: top + 2*dy + hpx };
+    const Bright = { x: sx + dx, y: top + dy   + hpx };
+    const Bleft  = { x: sx - dx, y: top + dy   + hpx };
+    scene.push({ pts:[Ttop, Tright, Tbot, Tleft], shade: this.TRU_SHADE_TOP,   depth, green });
+    scene.push({ pts:[Tleft, Tbot, Bbot, Bleft],  shade: this.TRU_SHADE_LEFT,  depth, green });
+    scene.push({ pts:[Tbot, Tright, Bright, Bbot], shade: this.TRU_SHADE_RIGHT, depth, green });
+  }
+
+  _truRenderScene() {
+    const { W, H, DPR } = this;
+    const fc = this.fCtx;
+    fc.setTransform(1,0,0,1,0,0);
+    fc.clearRect(0,0,W*DPR,H*DPR);
+    fc.save();
+    fc.scale(DPR,DPR);
+
+    const st = this.trustState;
+    const cx = W/2 + this.TRU_OFFSET_X * W;
+    const cy = H/2 + this._rem*1.2 + this.TRU_OFFSET_Y * H;
+    const E  = this._rem * this.TRU_CUBE_REM * this.TRU_SCALE;   // cube edge (master-scaled)
+    const dx = E * Math.cos(Math.PI/6);              // true-iso half-diagonals
+    const dy = E * Math.sin(Math.PI/6);
+    const hpx = E * this.TRU_HEIGHT_FRAC;
+
+    // corner-touch lattice basis: u=(2dx,-E), v=(2dx,E)
+    const ux = 2*dx, uy = -E, vx = 2*dx, vy = E;
+    const cells = this._truCells;
+    let maxR = 1;
+    for (const c of cells) {
+      const ox = c.i*ux + c.j*vx, oy = c.i*uy + c.j*vy;
+      const r = Math.hypot(ox, oy);
+      if (r > maxR) maxR = r;
+    }
+
+    const ov = this.TRU_REVEAL_OVL;
+    const revealOf = (distNorm) => {
+      const start = distNorm * ov;
+      const dur   = 1 - start;
+      return Math.max(0, Math.min(1, (st.reveal - start) / Math.max(0.0001, dur)));
+    };
+    const easeOut = x => 1 - Math.pow(1 - x, 3);
+
+    const scene = [];
+    for (const c of cells) {
+      const ox = c.i*ux + c.j*vx, oy = c.i*uy + c.j*vy;
+      const distNorm = Math.hypot(ox, oy) / maxR;
+      const sc = easeOut(revealOf(distNorm));
+      if (sc <= 0.001) continue;
+      const isCentre = (c.i === 0 && c.j === 0);
+      this._truAddCube(scene, cx + ox, cy + oy, dx*sc, dy*sc, hpx*sc, oy, isCentre);
+    }
+    scene.sort((A,B) => A.depth - B.depth);          // far → near
+
+    const [gr, gg, gb] = this.TRAIL_GREEN.split(',').map(Number);
+    for (const f of scene) {
+      if (f.green) {
+        // green centre cube: scale the green by the face shade so 3D reads
+        const r = Math.round(gr * f.shade), g = Math.round(gg * f.shade), b = Math.round(gb * f.shade);
+        fc.fillStyle = `rgb(${r},${g},${b})`;
+      } else {
+        const v = Math.max(0, Math.min(255, Math.round(f.shade*255)));
+        fc.fillStyle = `rgb(${v},${v},${v})`;
+      }
+      fc.beginPath();
+      fc.moveTo(f.pts[0].x, f.pts[0].y);
+      for (let i=1;i<f.pts.length;i++) fc.lineTo(f.pts[i].x, f.pts[i].y);
+      fc.closePath();
+      fc.fill();
+    }
+    fc.restore();
+  }
+
+  _drawTrust() {
+    this._truRenderScene();
+
+    const { W, H, DPR, COLS, ROWS, STEP } = this;
+    const data = this.fCtx.getImageData(0,0,W*DPR,H*DPR).data;
+    const stride = Math.round(W * DPR);
+    const half = STEP/2;
+    const [lr, lg, lb] = this.LINE_COLOR.split(',').map(Number);
+    const [gr, gg, gb] = this.TRAIL_GREEN.split(',').map(Number);
+
+    for (let c=0;c<COLS;c++){
+      const sx = this.colXCache[c]+half;
+      const px = Math.min(W*DPR-1, Math.max(0,(sx*DPR)|0));
+      for (let r=0;r<ROWS;r++){
+        const sy = this.rowYCache[r]+half;
+        const py = Math.min(H*DPR-1,Math.max(0,(sy*DPR)|0));
+        const idx = (py*stride+px)*4;
+        if (data[idx+3]/255 <= this.THRESHOLD) continue;
+        const R = data[idx], G = data[idx+1], B = data[idx+2];
+        // Green centre cube pixels read as G noticeably above R/B.
+        const isGreen = G > R + 20 && G > B + 20;
+        // shade = brightness of the face (normalize against the channel max used)
+        const shade = isGreen ? G / gg : R / 255;
+        const sizeFrac = this.TRU_LIGHT_SIZE + (1 - this.TRU_LIGHT_SIZE) * shade;
+        const sz = this.FG_MAX * sizeFrac;
+        if (isGreen) {
+          this.ctx.fillStyle = `rgba(${gr},${gg},${gb},${shade})`;
+        } else {
+          this.ctx.fillStyle = `rgba(${lr},${lg},${lb},${shade})`;
+        }
+        this.ctx.fillRect(this.colXCache[c]+half-sz/2, this.rowYCache[r]+half-sz/2, sz, sz);
+      }
+    }
+  }
+
+  // =========================================================================
   // MAIN LOOP
   // =========================================================================
 
@@ -1873,6 +2037,9 @@ class LineGrid {
     // PHASE 7: Programmable Infrastructure active once reveal starts, until exit.
     const inf = this.infraState;
     this.infraActive = inf.reveal > 0.001 && inf.exit < 0.999;
+    // PHASE 8: Trust & Operations cube field active once its reveal starts.
+    const tu = this.trustState;
+    this.trustActive = tu.reveal > 0.001;
 
     // Mouse smoothing + velocity
     if (this.targetX >= 0) {
@@ -1886,6 +2053,9 @@ class LineGrid {
     }
     this.velocity *= this.VEL_DECAY;
     const velStrength = Math.min(this.velocity * this.VEL_SCALE, 1);
+    // Velocity → green blend: 0 at rest (trail = line colour), 1 at high speed
+    // (trail blends fully toward TRAIL_GREEN). Reaches full green at TRAIL_GREEN_VEL.
+    const greenAmt = Math.max(0, Math.min(1, velStrength / this.TRAIL_GREEN_VEL));
 
     if (velStrength > 0.01 && this.smoothX >= 0) {
       this.trail.push({ x: this.smoothX, y: this.smoothY, v: velStrength });
@@ -1943,14 +2113,29 @@ class LineGrid {
           if (influence > 0.02) targetSz = this.HOVER_MIN + influence * (this.HOVER_MAX - this.HOVER_MIN);
         }
         if (targetSz > 0.001) {
-          ctx.fillStyle = `rgba(${this.LINE_COLOR},0.9)`;
+          if (greenAmt > 0.05) {
+            // blend line colour → TRAIL_GREEN by greenAmt
+            const [lr, lg, lb] = this.LINE_COLOR.split(',').map(Number);
+            const [gr, gg, gb] = this.TRAIL_GREEN.split(',').map(Number);
+            const r = Math.round(lr + (gr - lr) * greenAmt);
+            const g = Math.round(lg + (gg - lg) * greenAmt);
+            const b = Math.round(lb + (gb - lb) * greenAmt);
+            ctx.fillStyle = `rgba(${r},${g},${b},0.9)`;
+          } else {
+            ctx.fillStyle = `rgba(${this.LINE_COLOR},0.9)`;
+          }
           this._drawPixelCentered(cellX, cellY, targetSz);
         }
       }
     }
 
-    // ── Foreground priority: infra → treasury → trade → pnet → cube → currency → globe
-    if (this.infraActive) {
+    // ── Foreground by mode ──────────────────────────────────────────────────
+    if (this.MODE === 'empty') {
+      // background grid + hover only — nothing more to draw
+    } else if (this.trustActive) {
+      if (this._fgTarget) for (let c = 0; c < COLS; c++) this.fgActive[c].fill(0);
+      this._drawTrust();
+    } else if (this.infraActive) {
       if (this._fgTarget) for (let c = 0; c < COLS; c++) this.fgActive[c].fill(0);
       this._drawInfra();
     } else if (this.treasuryActive) {
@@ -2045,4 +2230,16 @@ const grid1 = new LineGrid('#section-1', {
   infBaseYawDeg: 45,
   infTiltDeg:    35,
   infSpinTurns:  1,      // network does one full turn in the middle
+  // Trust & Operations — isometric cube field
+  truScale:     0.87,     // master scale of the whole field (up/down)
+  truRings:     3,       // hex rings out from centre (1 -> 7, 2 -> 19, 3 -> 37)
+  truOffsetX:  0.17,     // 30% of canvas width to the LEFT  (positive = right)
+  truOffsetY:  -0.25,     // 30% of canvas height UP          (positive = down)
+});
+
+// 4th canvas — empty grid + hover only, in the footer slot.
+const grid4 = new LineGrid('.pn-footer-canvas', {
+  mode:        'empty',
+  bgColor:     '--white',
+  lineColor:   '--dark',
 });
