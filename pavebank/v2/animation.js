@@ -83,17 +83,17 @@ window.addEventListener('load', () => {
       scrollTrigger: {
         trigger: '.pn-trust-operations',
         start:   'top 30%',
-        end:     'top 0%',
+        end:     'top -30%',
         scrub:   true,
       }
     })
     .to('.cr-blocks.left, .cr-blocks.right', {
       width: '1.4rem',
-      ease:  'none',
+      ease:  'power1.inOut',
     }, 0)
     .to('.cr-blocks.bottom', {
       height: '7.4rem',
-      ease:   'none',
+      ease:   'power1.inOut',
     }, 0);
   }
 
