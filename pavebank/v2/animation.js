@@ -82,8 +82,8 @@ window.addEventListener('load', () => {
     gsap.timeline({
       scrollTrigger: {
         trigger: '.pn-trust-operations',
-        start:   'top bottom',
-        end:     'top top',
+        start:   'top 30%',
+        end:     'top 0%',
         scrub:   true,
       }
     })
@@ -472,7 +472,7 @@ window.addEventListener('load', () => {
     .to(split.words, {
       opacity: 1,
       y:       '0%',
-      stagger: 0.2,
+      stagger: 0.1,
       ease:    'circ.out',
     }, "<")
     .to(navItems, {
@@ -503,8 +503,53 @@ window.addEventListener('load', () => {
       y:       '10%',
       stagger: 0.2,
       ease:    'circ.in',
-    }, '<+=50%');
+    }, '<+=10%');
 
+  }
+
+  // ── Trust & operations — heading + subitems reveal ─────────────────────────
+  // Scrubbed on .pn-trust-scroller (top bottom → bottom bottom). The heading
+  // words stagger in, then each .tap-subitem's .subhead and .body-text follow.
+  // Heading is scoped INSIDE .pn-trust-operations so it doesn't clash with the
+  // product section's own .pn-heading-2.
+  const trustHeading = document.querySelector('.pn-trust-operations .pn-heading-2');
+  const tapSubitems  = gsap.utils.toArray('.pn-trust-operations .tap-items .tap-subitem');
+
+  if (trustHeading) {
+    const trustSplit = SplitText.create(trustHeading, { type: 'words' });
+    gsap.set(trustSplit.words, { opacity: 0, y: '10%' });
+
+    // collect each subitem's subhead + body
+    const trustLines = [];
+    tapSubitems.forEach((el) => {
+      const sh = el.querySelector('.subhead');
+      const bt = el.querySelector('.body-text');
+      if (sh) trustLines.push(sh);
+      if (bt) trustLines.push(bt);
+    });
+    gsap.set(trustLines, { opacity: 0, y: '10%' });
+
+    const tlTrust = gsap.timeline({
+      scrollTrigger: {
+        trigger: '.pn-trust-scroller',
+        start:   'top bottom',
+        end:     'bottom bottom',
+        scrub:   true,
+      }
+    });
+
+    tlTrust.to(trustSplit.words, {
+      opacity: 1,
+      y:       '0%',
+      stagger: 0.2,
+      ease:    'circ.out',
+    }, 0)
+    .to(trustLines, {
+      opacity: 1,
+      y:       '0%',
+      stagger: 0.1,
+      ease:    'circ.out',
+    }, '<+=50%');
   }
 
   // ── Product nav active-state sync ──────────────────────────────────────────
