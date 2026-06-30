@@ -706,9 +706,26 @@ window.addEventListener('load', () => {
   // ── Footer content block — y 10% → -10% on .footer scroll (scrub) ──────────
   if (document.querySelector('.footer') && document.querySelector('.footer-content-block')) {
     gsap.fromTo('.footer-content-block',
-      { y: '-60%' },
+      { y: '0%' },
       {
-        y: '50%',
+        y: '0%',
+        ease: 'none',
+        scrollTrigger: {
+          trigger: '.footer',
+          start:   'top bottom',
+          end:     'bottom bottom',
+          scrub:   true,
+        },
+      }
+    );
+  }
+
+  // ── Footer — move .pn-canvas-block down 10% on .footer scroll (scrub) ──────
+  if (document.querySelector('.footer') && document.querySelector('.pn-canvas-block')) {
+    gsap.fromTo('.pn-canvas-block',
+      { y: '0%' },
+      {
+        y: '15vh',
         ease: 'none',
         scrollTrigger: {
           trigger: '.footer',
