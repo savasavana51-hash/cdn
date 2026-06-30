@@ -357,6 +357,7 @@ class LineGrid {
     this.TRU_HEIGHT_FRAC   = options.truHeightFrac !== undefined ? options.truHeightFrac : 1.0;  // pillar height / edge
     this.TRU_RINGS         = options.truRings      !== undefined ? options.truRings      : 3;    // hex rings out
     this.TRU_REVEAL_OVL    = options.truRevealOvl  !== undefined ? options.truRevealOvl  : 0.6;  // ring-to-ring overlap
+    this.TRU_EASE_POW      = options.truEasePow    !== undefined ? options.truEasePow    : 3;    // per-cube ease-out power (1 linear, higher = snappier)
     this.TRU_SHADE_TOP     = options.truShadeTop   !== undefined ? options.truShadeTop   : 0.62;
     this.TRU_SHADE_LEFT    = options.truShadeLeft  !== undefined ? options.truShadeLeft  : 0.42;
     this.TRU_SHADE_RIGHT   = options.truShadeRight !== undefined ? options.truShadeRight : 0.20;
@@ -1887,7 +1888,7 @@ class LineGrid {
   // Draw one straight-on iso cube directly in screen space (3 visible faces).
   //   (sx,sy) = footprint anchor (middle vertex); dx,dy = top-rhombus half-
   //   diagonals; hpx = pillar height. Pushes faces with a depth key.
-  _truAddCube(scene, sx, sy, dx, dy, hpx, depth, green) {
+  _truAddCube(scene, sx, sy, dx, dy, hpx, depth, green, op) {
     const top    = sy - hpx;
     const Ttop   = { x: sx,      y: top };
     const Tright = { x: sx + dx, y: top + dy };
@@ -1896,9 +1897,9 @@ class LineGrid {
     const Bbot   = { x: sx,      y: top + 2*dy + hpx };
     const Bright = { x: sx + dx, y: top + dy   + hpx };
     const Bleft  = { x: sx - dx, y: top + dy   + hpx };
-    scene.push({ pts:[Ttop, Tright, Tbot, Tleft], shade: this.TRU_SHADE_TOP,   depth, green });
-    scene.push({ pts:[Tleft, Tbot, Bbot, Bleft],  shade: this.TRU_SHADE_LEFT,  depth, green });
-    scene.push({ pts:[Tbot, Tright, Bright, Bbot], shade: this.TRU_SHADE_RIGHT, depth, green });
+    scene.push({ pts:[Ttop, Tright, Tbot, Tleft], shade: this.TRU_SHADE_TOP,   depth, green, op });
+    scene.push({ pts:[Tleft, Tbot, Bbot, Bleft],  shade: this.TRU_SHADE_LEFT,  depth, green, op });
+    scene.push({ pts:[Tbot, Tright, Bright, Bbot], shade: this.TRU_SHADE_RIGHT, depth, green, op });
   }
 
   _truRenderScene() {
@@ -1933,21 +1934,28 @@ class LineGrid {
       const dur   = 1 - start;
       return Math.max(0, Math.min(1, (st.reveal - start) / Math.max(0.0001, dur)));
     };
-    const easeOut = x => 1 - Math.pow(1 - x, 3);
+    const easeOut = x => 1 - Math.pow(1 - x, this.TRU_EASE_POW);
 
     const scene = [];
+    // Split each cube's reveal into two non-overlapping phases:
+    //   phase 1 (0 → SPLIT): opacity fades 0 → 1 at zero height (flat tile)
+    //   phase 2 (SPLIT → 1): height grows 0 → full at full opacity
+    const SPLIT = 0.45;
     for (const c of cells) {
       const ox = c.i*ux + c.j*vx, oy = c.i*uy + c.j*vy;
       const distNorm = Math.hypot(ox, oy) / maxR;
       const sc = easeOut(revealOf(distNorm));
-      if (sc <= 0.001) continue;
+      if (sc <= 0.0001) continue;           // not started yet
       const isCentre = (c.i === 0 && c.j === 0);
-      this._truAddCube(scene, cx + ox, cy + oy, dx*sc, dy*sc, hpx*sc, oy, isCentre);
+      const op   = Math.min(1, sc / SPLIT);                         // fade in first
+      const hFr  = Math.max(0, (sc - SPLIT) / (1 - SPLIT));         // then grow height
+      this._truAddCube(scene, cx + ox, cy + oy, dx, dy, hpx*hFr, oy, isCentre, op);
     }
     scene.sort((A,B) => A.depth - B.depth);          // far → near
 
     const [gr, gg, gb] = this.TRAIL_GREEN.split(',').map(Number);
     for (const f of scene) {
+      fc.globalAlpha = f.op !== undefined ? Math.max(0, Math.min(1, f.op)) : 1;
       if (f.green) {
         // green centre cube: scale the green by the face shade so 3D reads
         const r = Math.round(gr * f.shade), g = Math.round(gg * f.shade), b = Math.round(gb * f.shade);
@@ -1962,6 +1970,7 @@ class LineGrid {
       fc.closePath();
       fc.fill();
     }
+    fc.globalAlpha = 1;
     fc.restore();
   }
 
@@ -1982,18 +1991,21 @@ class LineGrid {
         const sy = this.rowYCache[r]+half;
         const py = Math.min(H*DPR-1,Math.max(0,(sy*DPR)|0));
         const idx = (py*stride+px)*4;
-        if (data[idx+3]/255 <= this.THRESHOLD) continue;
+        const alpha = data[idx+3]/255;          // buffer alpha = cube reveal/opacity
+        if (alpha <= 0.02) continue;            // skip empty pixels only
+        // Canvas stores straight (non-premultiplied) RGBA, so the channel values
+        // are the true face brightness regardless of the cube's fade alpha.
         const R = data[idx], G = data[idx+1], B = data[idx+2];
         // Green centre cube pixels read as G noticeably above R/B.
         const isGreen = G > R + 20 && G > B + 20;
-        // shade = brightness of the face (normalize against the channel max used)
         const shade = isGreen ? G / gg : R / 255;
         const sizeFrac = this.TRU_LIGHT_SIZE + (1 - this.TRU_LIGHT_SIZE) * shade;
-        const sz = this.FG_MAX * sizeFrac;
+        const sz = this.FG_MAX * sizeFrac * alpha;   // dot shrinks with fade
+        const a  = shade * alpha;                    // dot fades with reveal
         if (isGreen) {
-          this.ctx.fillStyle = `rgba(${gr},${gg},${gb},${shade})`;
+          this.ctx.fillStyle = `rgba(${gr},${gg},${gb},${a})`;
         } else {
-          this.ctx.fillStyle = `rgba(${lr},${lg},${lb},${shade})`;
+          this.ctx.fillStyle = `rgba(${lr},${lg},${lb},${a})`;
         }
         this.ctx.fillRect(this.colXCache[c]+half-sz/2, this.rowYCache[r]+half-sz/2, sz, sz);
       }
@@ -2197,8 +2209,9 @@ const grid1 = new LineGrid('#section-1', {
   damMiniRem:  1.51,
   // PaveNet ring sizes (−20% again from 5.52 / 1.1), gap restored
   pnetDiskRem:  4.42,
-  pnetThickRem: 0.88,
-  pnetRingGap:  0.34,
+  pnetRingCount: 3,     // 3 rings (was 4)
+  pnetThickRem: 1.4,   // thicker (×4/3) so 3 rings read with the same heft as 4
+  pnetRingGap:  0.3,
   pnetSpinTurns: 0.5,   // 180° rotations (was 360°)
   pnetYawDeg:    0,     // dead-on at rest (no tilt)
   pnetSides:     6,     // hexagonal rings (use high number, e.g. 64, for circles)
@@ -2231,10 +2244,12 @@ const grid1 = new LineGrid('#section-1', {
   infTiltDeg:    35,
   infSpinTurns:  1,      // network does one full turn in the middle
   // Trust & Operations — isometric cube field
-  truScale:     0.87,     // master scale of the whole field (up/down)
-  truRings:     3,       // hex rings out from centre (1 -> 7, 2 -> 19, 3 -> 37)
-  truOffsetX:  0.17,     // 30% of canvas width to the LEFT  (positive = right)
-  truOffsetY:  -0.25,     // 30% of canvas height UP          (positive = down)
+  truScale:     0.63,    // master scale of the whole field (up/down)
+  truRings:     5,       // hex rings out from centre (1 -> 7, 2 -> 19, 3 -> 37, 4 -> 61)
+  truOffsetX:   0.17,    // fraction of canvas width  (positive = right)
+  truOffsetY:  -0.25,    // fraction of canvas height (negative = up)
+  truRevealOvl: 0.6,     // ring-to-ring stagger overlap (low = sequential ripple, high = more together)
+  truEasePow:   3,       // per-cube ease-out (1 = linear, 2 gentle, 3 default, 4-5 snappier)
 });
 
 // 4th canvas — empty grid + hover only, in the footer slot.
