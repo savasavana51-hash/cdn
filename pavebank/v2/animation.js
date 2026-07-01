@@ -749,9 +749,9 @@ window.addEventListener('load', () => {
   // ── Footer content block — y 10% → -10% on .footer scroll (scrub) ──────────
   if (document.querySelector('.footer') && document.querySelector('.footer-content-block')) {
     gsap.fromTo('.footer-content-block',
-      { y: '10%' },
+      { y: '50%' },
       {
-        y: '-10%',
+        y: '0%',
         ease: 'none',
         scrollTrigger: {
           trigger: '.footer',
