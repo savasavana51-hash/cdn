@@ -508,7 +508,7 @@ window.addEventListener('load', () => {
     }, 0)
     .to(split.words, {
       opacity: 0,
-      y:       '10%',
+      y:       '-10%',
       stagger: 0.1,
       ease:    'circ.in',
     }, '<+=10%');
