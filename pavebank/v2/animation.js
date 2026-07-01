@@ -474,7 +474,7 @@ window.addEventListener('load', () => {
 
     // First 50% of scroll: heading words stagger in
     tl.to(graphicDot, {
-      opacity: 0,
+      opacity: 1,
       ease:    'none',
     }, 0)
     .to(split.words, {
