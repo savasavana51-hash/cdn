@@ -795,7 +795,7 @@ window.addEventListener('load', () => {
     },
   });
 
-  /*
+  
   // ── Nav hide on scroll-down, show on scroll-up ─────────────────────────────
   
   const pnNav = document.querySelector('.pn-nav');
@@ -815,5 +815,5 @@ window.addEventListener('load', () => {
     });
   }
 
-  */
+  
 });
