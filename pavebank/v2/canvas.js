@@ -118,7 +118,7 @@ class LineGrid {
     this.globeAngle     = 0;
     this.globeCountries = [];
     this.globeReady     = false;
-    this.GLOBE_TILT     = options.globeTilt  !== undefined ? options.globeTilt  : -0.3;
+    this.GLOBE_TILT     = options.globeTilt  !== undefined ? options.globeTilt  : -0.4;
     this.GLOBE_SPEED    = options.globeSpeed  || 0.005;
     this.globeRevealScale     = 1;
     this.globeScrollProgress  = 0;  // 0 = cropped at bottom, 1 = end position
@@ -702,6 +702,17 @@ class LineGrid {
     this._globeR    = GLOBE_R;
     this._globeFocal = FOCAL;
 
+    // Clip to the sphere silhouette. The rim-walk fill below pushes limb-crossing
+    // boundary points out to GLOBE_R (which shows as spikes just outside the
+    // globe); the visible limb sits at the perspective-scaled radius, so clipping
+    // here hides those spikes while keeping every bit of real coastline. The
+    // rim-walk itself removes the interior "slice" chord.
+    const limbR = GLOBE_R * FOCAL / (FOCAL + 300);
+    fCtx.save();
+    fCtx.beginPath();
+    fCtx.arc(GLOBE_CX, GLOBE_CY, limbR, 0, Math.PI*2);
+    fCtx.clip();
+
     this.globeCountries.forEach(ring => {
       const pts = []; let anyVisible = false;
       for (let i = 0; i < ring.length; i++) {
@@ -718,16 +729,39 @@ class LineGrid {
         if (!behind) anyVisible = true;
       }
       if (!anyVisible) return;
-      fCtx.beginPath(); let penDown = false;
-      pts.forEach(({ sx, sy, behind }) => {
-        if (behind) { penDown = false; return; }
-        if (!penDown) { fCtx.moveTo(sx, sy); penDown = true; }
-        else fCtx.lineTo(sx, sy);
-      });
-      if (penDown) fCtx.closePath();
+      // Rim-walk: at each visible↔hidden transition push the boundary point out to
+      // the sphere edge and bridge hidden arcs along the rim. This removes the
+      // interior chord ("slice") that a plain pen-lift + fill would draw across a
+      // country straddling the limb. Spikes it creates outside the globe are
+      // hidden by the clip above.
+      const edge = (p) => {
+        const ex = p.sx - GLOBE_CX, ey = p.sy - GLOBE_CY;
+        const len = Math.hypot(ex, ey) || 1;
+        return { sx: GLOBE_CX + ex/len*GLOBE_R, sy: GLOBE_CY + ey/len*GLOBE_R };
+      };
+      fCtx.beginPath();
+      let started = false;
+      const n = pts.length;
+      for (let i = 0; i < n; i++) {
+        const cur = pts[i], prev = pts[(i - 1 + n) % n];
+        if (!cur.behind) {
+          if (!started) {
+            if (prev.behind) { const e = edge(cur); fCtx.moveTo(e.sx, e.sy); fCtx.lineTo(cur.sx, cur.sy); }
+            else fCtx.moveTo(cur.sx, cur.sy);
+            started = true;
+          } else {
+            fCtx.lineTo(cur.sx, cur.sy);
+          }
+        } else if (started && !prev.behind) {
+          const e = edge(prev);
+          fCtx.lineTo(e.sx, e.sy);
+        }
+      }
+      fCtx.closePath();
       fCtx.fill();
     });
 
+    fCtx.restore();   // release the silhouette clip
     fCtx.restore();
     return GLOBE_R_FULL_LERPED;
   }
@@ -760,7 +794,7 @@ class LineGrid {
     const cosT = Math.cos(this.GLOBE_TILT),  sinT = Math.sin(this.GLOBE_TILT);
     const ctx  = this.ctx;
     const green = this.GLOBE_MARKER_COLOR;
-    const SPREAD = 2;
+    const SPREAD = 3;
     const markerFade = 1 - this._disintegrate;  // markers fade with globe
     if (markerFade <= 0.001) return;
 
@@ -776,7 +810,9 @@ class LineGrid {
       const sy = GLOBE_CY + (-y2)*GLOBE_R * s;
       const phase = this.waveTime * 2.2 + i * 1.7;
       const blink = (Math.sin(phase) + 1) / 2;
-      const alpha = (0.2 + blink * 0.8) * markerFade;
+      // High floor so the spot never fades to invisibility — a gentle pulse
+      // (0.75 → 1.0) instead of the old 0.2 → 1.0 that dropped it to near-nothing.
+      const alpha = (0.75 + blink * 0.25) * markerFade;
       const col0  = Math.round((sx - half) / STEP);
       const row0  = Math.round((sy - half) / STEP);
       for (let dc = -SPREAD; dc <= SPREAD; dc++) {
@@ -786,8 +822,9 @@ class LineGrid {
           const d = Math.sqrt(dc*dc + dr*dr);
           if (d > SPREAD + 0.3) continue;
           const falloff = Math.max(0, 1 - d / (SPREAD + 0.3));
-          const sz = this.FG_MIN + falloff * (this.FG_MAX - this.FG_MIN) * (0.5 + blink * 0.5);
-          ctx.fillStyle = `rgba(${green},${alpha * (0.35 + falloff * 0.65)})`;
+          // Size holds near full (0.85 → 1.0 with the pulse) so dots stay big.
+          const sz = this.FG_MIN + falloff * (this.FG_MAX - this.FG_MIN) * (0.85 + blink * 0.15);
+          ctx.fillStyle = `rgba(${green},${alpha * (0.55 + falloff * 0.45)})`;
           this._drawPixelCentered(this.colXCache[col], this.rowYCache[row], sz);
         }
       }
@@ -2210,8 +2247,8 @@ const grid1 = new LineGrid('#section-1', {
   // PaveNet ring sizes (−20% again from 5.52 / 1.1), gap restored
   pnetDiskRem:  4.42,
   pnetRingCount: 3,     // 3 rings (was 4)
-  pnetThickRem: 1.4,   // thicker (×4/3) so 3 rings read with the same heft as 4
-  pnetRingGap:  0.3,
+  pnetThickRem: 1.17,   // thicker (×4/3) so 3 rings read with the same heft as 4
+  pnetRingGap:  0.34,
   pnetSpinTurns: 0.5,   // 180° rotations (was 360°)
   pnetYawDeg:    0,     // dead-on at rest (no tilt)
   pnetSides:     6,     // hexagonal rings (use high number, e.g. 64, for circles)
@@ -2244,8 +2281,8 @@ const grid1 = new LineGrid('#section-1', {
   infTiltDeg:    35,
   infSpinTurns:  1,      // network does one full turn in the middle
   // Trust & Operations — isometric cube field
-  truScale:     0.63,    // master scale of the whole field (up/down)
-  truRings:     5,       // hex rings out from centre (1 -> 7, 2 -> 19, 3 -> 37, 4 -> 61)
+  truScale:     0.65,    // master scale of the whole field (up/down)
+  truRings:     4,       // hex rings out from centre (1 -> 7, 2 -> 19, 3 -> 37, 4 -> 61)
   truOffsetX:   0.17,    // fraction of canvas width  (positive = right)
   truOffsetY:  -0.25,    // fraction of canvas height (negative = up)
   truRevealOvl: 0.6,     // ring-to-ring stagger overlap (low = sequential ripple, high = more together)
