@@ -18,9 +18,9 @@
 
 (() => {
   const CFG = {
-    cellRem:   0.375,    // dissolve cell size in REM (0.375rem ≈ 6px at 16px root) — stays responsive
+    cellRem:   0.24,     // dissolve cell size in REM — scales with the root font-size
     duration:  0.6,      // seconds for full in / out
-    softness:  0.15,     // 0 = hard front, 1 = soft (cells ease across a wide band)
+    softness:  0.06,     // 0 = hard front, 1 = soft (cells ease across a wide band)
     scatter:   0.45,     // 0 = ordered centre-out sweep, 1 = fully random per-cell
     tweenEase: 'circ.out',                 // GSAP ease driving the sweep
     cellEase:  t => 1 - Math.pow(1 - t, 3), // per-cell grow-in curve (cubic out)
