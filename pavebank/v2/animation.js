@@ -511,7 +511,11 @@ window.addEventListener('load', () => {
       y:       '-10%',
       stagger: 0.1,
       ease:    'circ.in',
-    }, '<+=10%');
+    }, '<+=10%')
+    .to(graphicDot, {
+      opacity: 0,
+      ease:    'none',
+    }, 0);
 
   }
 
