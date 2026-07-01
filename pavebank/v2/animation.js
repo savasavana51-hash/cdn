@@ -474,7 +474,7 @@ window.addEventListener('load', () => {
 
     // First 50% of scroll: heading words stagger in
     tl.to(graphicDot, {
-      opacity: 1,
+      opacity: 0,
       ease:    'none',
     }, 0)
     .to(split.words, {
@@ -511,11 +511,7 @@ window.addEventListener('load', () => {
       y:       '-10%',
       stagger: 0.1,
       ease:    'circ.in',
-    }, '<+=10%')
-    .to(graphicDot, {
-      opacity: 0,
-      ease:    'none',
-    }, 0);
+    }, '<+=10%');
 
   }
 
@@ -574,6 +570,49 @@ window.addEventListener('load', () => {
   const navDot         = document.querySelector('.pn-product-nav-dot');
   let   activeNavIndex = 0;
   let   dotIntroDone   = false;   // dot scales in on its first appearance
+
+  // ── Nav click → scroll to the matching product section ─────────────────────
+  // Clicking .pn-product-nav[i] scrolls so the top of .pn-product-scroll[i]
+  // lands at 70% of the viewport height. Prefers Lenis (window.lenis) so the
+  // smooth-scroll loop drives it and doesn't fight the tween; falls back to GSAP
+  // ScrollToPlugin if Lenis isn't present.
+  //   Lenis offset sign is opposite GSAP's: -70vh puts the section top 70% down.
+  if (window.ScrollToPlugin) gsap.registerPlugin(window.ScrollToPlugin);
+
+  const scrollToSection = (section) => {
+    const offset = window.innerHeight * 0.6;
+
+    // Dynamic duration: scale with how far we're jumping. Target scroll position
+    // = section top minus the 60vh offset; distance from the current scroll maps
+    // (as a fraction of a full viewport) into a clamped duration range so short
+    // hops stay snappy and long jumps get a little more glide.
+    const targetY   = section.getBoundingClientRect().top + window.scrollY - offset;
+    const distance  = Math.abs(targetY - window.scrollY);
+    const viewports = distance / window.innerHeight;      // jump length in screens
+    const MIN_DUR = 1.5, MAX_DUR = 6, PER_VIEWPORT = 1;
+    const duration = Math.max(MIN_DUR, Math.min(MAX_DUR, MIN_DUR + viewports * PER_VIEWPORT));
+
+    if (window.lenis && typeof window.lenis.scrollTo === 'function') {
+      window.lenis.scrollTo(section, {
+        offset: -offset,            // negative = stop point sits lower (60% down)
+        duration,
+        easing: (t) => 1 - Math.pow(1 - t, 4),   // quart ease-out (≈ expo.out)
+      });
+    } else {
+      gsap.to(window, {
+        duration,
+        ease: 'expo.out',
+        scrollTo: { y: section, offsetY: offset },
+      });
+    }
+  };
+
+  navWrappers.forEach((nav, i) => {
+    const section = productScrolls[i];
+    if (!nav || !section) return;
+    nav.style.cursor = 'pointer';
+    nav.addEventListener('click', () => scrollToSection(section));
+  });
 
   // All product content starts hidden (they render visible in the DOM on load).
   gsap.set(productContents, { y: '0.6rem', opacity: 0 });
@@ -710,9 +749,9 @@ window.addEventListener('load', () => {
   // ── Footer content block — y 10% → -10% on .footer scroll (scrub) ──────────
   if (document.querySelector('.footer') && document.querySelector('.footer-content-block')) {
     gsap.fromTo('.footer-content-block',
-      { y: '3rem' },
+      { y: '10%' },
       {
-        y: '0rem',
+        y: '-10%',
         ease: 'none',
         scrollTrigger: {
           trigger: '.footer',
@@ -729,7 +768,7 @@ window.addEventListener('load', () => {
     gsap.fromTo('.pn-canvas-block',
       { y: '0%' },
       {
-        y: '15vh',
+        y: '10%',
         ease: 'none',
         scrollTrigger: {
           trigger: '.footer',
