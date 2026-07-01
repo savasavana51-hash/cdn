@@ -76,7 +76,7 @@ class LineGrid {
     this.WAVE_SPEED    = cfg.waveSpeed;
     this.THRESHOLD     = cfg.threshold;
     this.TRAIL_LEN     = cfg.trailLen;
-    this.TRAIL_GREEN     = this._hexToRgb(cfg.trailGreen || '#77DD84');  // velocity trail accent
+    this.TRAIL_GREEN     = this._greenRgb(cfg.trailGreen);  // velocity trail accent (--pavegreen)
     this.TRAIL_GREEN_VEL = cfg.trailGreenVel !== undefined ? cfg.trailGreenVel : 0.45;
     this.BG_OPACITY    = cfg.bgOpacity;
 
@@ -132,7 +132,7 @@ class LineGrid {
     this.GLOBE_END_VH    = options.globeEndVh    !== undefined ? options.globeEndVh    : 0;   // -100vh
     this.GLOBE_END_R_REM = options.globeEndRRem  !== undefined ? options.globeEndRRem  : 4;    // shrink target
 
-    this.GLOBE_MARKER_COLOR = this._hexToRgb(options.markerColor || '#77DD84');
+    this.GLOBE_MARKER_COLOR = this._greenRgb(options.markerColor);   // --pavegreen
     this.globeMarkers = options.globeMarkers || [
       { name: 'GE',  lon: 43.3569,  lat: 42.3154 },
       { name: 'SG',  lon: 103.8198, lat: 1.3521  },
@@ -498,6 +498,8 @@ class LineGrid {
   refreshColors() {
     if (this._bgVar)   this.BG_COLOR   = this._readVar(this._bgVar);
     if (this._lineVar) this.LINE_COLOR  = this._hexToRgb(this._readVar(this._lineVar));
+    this.TRAIL_GREEN        = this._greenRgb();   // re-read --pavegreen
+    this.GLOBE_MARKER_COLOR = this._greenRgb();
     this.canvas.style.background = this.BG_COLOR;
   }
 
@@ -509,6 +511,27 @@ class LineGrid {
     const g = parseInt(hex.slice(2,4), 16);
     const b = parseInt(hex.slice(4,6), 16);
     return `${r},${g},${b}`;
+  }
+
+  // Normalize any CSS colour string to an "r,g,b" triple. Accepts hex (#77DD84),
+  // rgb()/rgba(), or a computed value. Used so green can come from a CSS var.
+  _colorToRgb(str) {
+    if (!str) return null;
+    str = str.trim();
+    if (str.startsWith('#')) return this._hexToRgb(str);
+    const m = str.match(/rgba?\(([^)]+)\)/);
+    if (m) {
+      const p = m[1].split(',').map(s => parseFloat(s));
+      return `${Math.round(p[0])},${Math.round(p[1])},${Math.round(p[2])}`;
+    }
+    return null;
+  }
+
+  // Resolve the accent green as "r,g,b". Prefers the --pavegreen CSS variable so
+  // the whole system tracks the brand token; falls back to the provided colour.
+  _greenRgb(fallback) {
+    const fromVar = this._colorToRgb(this._readVar('--pavegreen'));
+    return fromVar || this._hexToRgb(fallback || '#77DD84');
   }
 
   _getFracCol(x) {
@@ -2281,9 +2304,9 @@ const grid1 = new LineGrid('#section-1', {
   infTiltDeg:    35,
   infSpinTurns:  1,      // network does one full turn in the middle
   // Trust & Operations — isometric cube field
-  truScale:     0.65,    // master scale of the whole field (up/down)
-  truRings:     4,       // hex rings out from centre (1 -> 7, 2 -> 19, 3 -> 37, 4 -> 61)
-  truOffsetX:   0.17,    // fraction of canvas width  (positive = right)
+  truScale:     0.665,    // master scale of the whole field (up/down)
+  truRings:     5,       // hex rings out from centre (1 -> 7, 2 -> 19, 3 -> 37, 4 -> 61)
+  truOffsetX:   0.168,    // fraction of canvas width  (positive = right)
   truOffsetY:  -0.25,    // fraction of canvas height (negative = up)
   truRevealOvl: 0.6,     // ring-to-ring stagger overlap (low = sequential ripple, high = more together)
   truEasePow:   3,       // per-cube ease-out (1 = linear, 2 gentle, 3 default, 4-5 snappier)
