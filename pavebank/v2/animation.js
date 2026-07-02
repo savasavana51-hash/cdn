@@ -96,7 +96,7 @@ window.addEventListener('load', () => {
       ease:   'power1.inOut',
     }, 0)
     .to('.cr-blocks.top', {
-      height: '3.2rem',
+      height: '3.6rem',
       ease:   'power1.inOut',
     }, 0)
     .to('.cr-blocks.bottom', {
