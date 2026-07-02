@@ -231,25 +231,16 @@ window.addEventListener('load', () => {
     }
   }
 
-  // ── Bank accounts — 3D currency sequence ($ → € → ¥) ───────────────────────
-  const C  = ['$', '\u20AC', '\u00A5'];   // Dollar, Euro, Yen
-  const cs = grid1.curState;              // the object the canvas renders
+  // ── Bank accounts — 3-currency triangle ($/€/¥ → £/₣/₹ → back) ─────────────
+  // Drives grid1.curState {reveal, flip1, flip2, dissolve}; the canvas computes
+  // the per-glyph triangle stagger. Same factory: fixed-vh reveal/exit, stretchy
+  // middle. reveal (pop) → flip1 (front→back) → flip2 (back→front) → dissolve.
+  const cs = grid1.curState;
 
-  // One flip step: proxy a 0→1 → 0→π rotation; symbol swaps at the 90° slab.
-  // `holdDur` is prepended as a delay so each flip waits a fixed hold first.
-  function flipStep(from, to) {
-    return (state, tl, holdDur, flipDur) => {
-      const proxy = { a: 0 };
-      tl.to(proxy, {
-        a: 1, duration: flipDur, ease: 'power2.inOut', delay: holdDur,
-        onUpdate() {
-          const local = proxy.a * Math.PI;
-          state.symbol    = proxy.a < 0.5 ? from : to;
-          state.flipAngle = -(local < Math.PI/2 ? local : local - Math.PI);
-        },
-      });
-    };
-  }
+  const flip1Step = (state, tl, holdDur, flipDur) =>
+    tl.to(state, { flip1: 1, duration: flipDur, ease: 'none', delay: holdDur });
+  const flip2Step = (state, tl, holdDur, flipDur) =>
+    tl.to(state, { flip2: 1, duration: flipDur, ease: 'none', delay: holdDur });
 
   buildProductSequence({
     trigger: '.pn-product-scroll.bankaccount',
@@ -262,17 +253,17 @@ window.addEventListener('load', () => {
     revealEase: 'circ.out',
     exitEase:   'none',
     onReveal: (s, p) => {
-      // p is already eased by the factory
-      s.symbol   = C[0];
-      s.scale    = p;
+      s.reveal   = p;     // 3 glyphs pop, staggered (p already eased)
+      s.flip1    = 0;
+      s.flip2    = 0;
       s.dissolve = 0;
     },
     onExit: (s, p) => {
-      s.dissolve = p;     // p already eased
+      s.dissolve = p;     // all three dissolve together (p already eased)
     },
     steps: [
-      flipStep(C[0], C[1]),   // $ → €
-      flipStep(C[1], C[2]),   // € → ¥
+      flip1Step,          // front → back  ($→£ €→₣ ¥→₹)
+      flip2Step,          // back → front  (£→$ ₣→€ ₹→¥)
     ],
   });
 
@@ -814,6 +805,6 @@ window.addEventListener('load', () => {
       },
     });
   }
+
   */
-  
 });
