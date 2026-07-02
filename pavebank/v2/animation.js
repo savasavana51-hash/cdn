@@ -797,7 +797,7 @@ window.addEventListener('load', () => {
 
   
   // ── Nav hide on scroll-down, show on scroll-up ─────────────────────────────
-  
+  /*
   const pnNav = document.querySelector('.pn-nav');
   const pn2Heading = document.querySelector('.pn-product-heading');
 
@@ -814,6 +814,6 @@ window.addEventListener('load', () => {
       },
     });
   }
-
+  */
   
 });
