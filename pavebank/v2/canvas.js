@@ -160,22 +160,32 @@ class LineGrid {
     this.damActive        = false;
 
     // ── 3D extruded currency sequence (GSAP timeline, scrubbed by bankProgress)
-    //   reveal $ → hold → flip $→€ → hold → flip €→¥ → hold → dissolve out.
-    //   Faces render solid, side walls render smaller & lighter (depth).
-    this.CUR_GLYPH_FRAC  = options.curGlyphFrac  !== undefined ? options.curGlyphFrac  : 0.32;
-    this.CUR_DEPTH       = options.curDepth      !== undefined ? options.curDepth      : 0.20;
-    this.CUR_FOCAL       = options.curFocal      !== undefined ? options.curFocal      : 2.8;
+    //   reveal (3 glyphs pop, staggered, in a triangle) → flip1 (front→back,
+    //   staggered: $→£ €→₣ ¥→₹) → flip2 (back→front) → dissolve together.
+    //   $ top-centre, € bottom-left, ¥ bottom-right. 3D extrude depth look.
+    this.CUR_GLYPH_FRAC  = options.curGlyphFrac  !== undefined ? options.curGlyphFrac  : 0.21;
+    this.CUR_SPREAD_REM  = options.curSpreadRem  !== undefined ? options.curSpreadRem  : 2;  // triangle spread
+    this.CUR_DEPTH       = options.curDepth      !== undefined ? options.curDepth      : 0.18;
+    this.CUR_FOCAL       = options.curFocal      !== undefined ? options.curFocal      : 6.0;
     this.CUR_FACE_SHADE  = 1.0;
-    this.CUR_WALL_SHADE  = 0.5;
+    this.CUR_WALL_SHADE  = options.curWallShade  !== undefined ? options.curWallShade  : 0.5;
     this.CUR_WALL_SIZE   = options.curWallSize   !== undefined ? options.curWallSize   : 0.7;  // wall px ÷ face px
+    this.CUR_REVEAL_OVL  = options.curRevealOvl  !== undefined ? options.curRevealOvl  : 0.8;  // reveal stagger overlap
+    this.CUR_FLIP_OVL    = options.curFlipOvl    !== undefined ? options.curFlipOvl    : 0.8;  // flip stagger overlap
     // dissolve (grid-quantized hop) tuning for the currency exit
     this.CUR_HOP_MAX     = options.curHopMax     !== undefined ? options.curHopMax     : 4;
     this.CUR_DIS_BAND    = options.curDisBand    !== undefined ? options.curDisBand    : 0.25;
     this.CUR_DIS_JITTER  = options.curDisJitter  !== undefined ? options.curDisJitter  : 0.18;
+    // Front faces and BACK faces revealed on flip1: $→£ GBP, €→₣ CHF, ¥→₹ INR.
+    // Order: [ $ top, € bottom-left, ¥ bottom-right ].
+    this.CUR_FRONT       = ['$', '\u20AC', '\u00A5'];
+    this.CUR_BACK        = ['\u00A3', '\u20A3', '\u20B9'];
+    // Triangle layout as fractions of CUR_SPREAD_REM.
+    this.CUR_TRI         = [ { dx: 0.0, dy: -0.6 }, { dx: -0.9, dy: 0.6 }, { dx: 0.9, dy: 0.6 } ];
     this._curMasks       = null;  // built lazily
     // Public tweenable state — animations.js builds the GSAP timeline against
-    // this object and scrubs it. The canvas just renders whatever it holds.
-    this.curState        = { scale: 0, flipAngle: 0, symbol: '$', dissolve: 0 };
+    // this object and scrubs it. The canvas computes per-glyph stagger from it.
+    this.curState        = { reveal: 0, flip1: 0, flip2: 0, dissolve: 0 };
     this._curState       = this.curState;   // internal alias
 
     // ── Digital Asset Management — isometric cube (6 minis → merge → spin → out)
@@ -855,11 +865,11 @@ class LineGrid {
   }
 
   // =========================================================================
-  // FOREGROUND: BANK ACCOUNTS — 3D extruded currency sequence ($ → € → ¥)
-  // Real extrude + project, faces solid / walls smaller+lighter (depth).
-  // Driven by a GSAP timeline scrubbed via this.bankProgress (0→1):
-  //   reveal $ → hold → flip $→€ → hold → flip €→¥ → hold → dissolve out.
-  // The flip rotates the glyph to a thin slab at 90° where the symbol swaps.
+  // FOREGROUND: BANK ACCOUNTS — 3-currency triangle (3D extruded)
+  //   reveal (3 glyphs pop, staggered) → flip1 ($→£ €→₣ ¥→₹, staggered) →
+  //   flip2 (back→front, staggered) → dissolve together. $ top-centre,
+  //   € bottom-left, ¥ bottom-right. State in this.curState {reveal,flip1,flip2,
+  //   dissolve}; the canvas computes per-glyph stagger from it.
   // =========================================================================
 
   _buildCurMask(symbol) {
@@ -884,33 +894,30 @@ class LineGrid {
   }
   _curRotNY(nx, nz, cosA, sinA) { return [ nx*cosA + nz*sinA, -nx*sinA + nz*cosA ]; }
 
-  // Symbols the currency sequence cycles through (animations.js references these).
-  static get CURRENCIES() { return ['$', '\u20AC', '\u00A5']; }
+  // Per-glyph local progress for a staggered phase (order 0,1,2).
+  _curLocal(p, i, ovl) {
+    const span = 1/(3 - 2*ovl);
+    const start = i*span*(1-ovl);
+    return Math.max(0, Math.min(1, (p - start)/span));
+  }
 
-  // Render the lit extruded glyph (grey faces/walls) into the offscreen buffer.
-  _renderCurrency3D(angle, symbol, scale) {
-    const { W, H, DPR } = this;
-    const fCtx = this.fCtx;
-    fCtx.setTransform(1,0,0,1,0,0);
-    fCtx.clearRect(0,0,W*DPR,H*DPR);
+  // Render ONE extruded glyph at screen-centre (ox,oy) into the buffer.
+  _curDrawGlyph(ox, oy, angle, symbol, scale) {
     if (scale <= 0.001) return;
-    fCtx.save();
-    fCtx.scale(DPR,DPR);
-
-    const gh = Math.min(W,H) * this.CUR_GLYPH_FRAC * scale;
+    const fCtx = this.fCtx;
+    const gh = Math.min(this.W, this.H) * this.CUR_GLYPH_FRAC * scale;
     const gw = gh, halfW = gw/2, halfH = gh/2;
     const depth = gh * this.CUR_DEPTH;
-    const cx = W/2, cy = H/2 + this._rem * 1.2;
     const focal = gh * this.CUR_FOCAL;
     const cosA = Math.cos(angle), sinA = Math.sin(angle);
     const dot = Math.max(1.1, this.STEP*0.6);
     const mask = this._curMasks[symbol];
+    if (!mask) return;
 
     const project = (lx,ly,lz) => {
-      const xr =  lx*cosA + lz*sinA;
-      const zr = -lx*sinA + lz*cosA;
-      const s  = focal/(focal+zr);
-      return { x: cx+xr*s, y: cy+ly*s, s };
+      const xr = lx*cosA + lz*sinA, zr = -lx*sinA + lz*cosA;
+      const s = focal/(focal+zr);
+      return { x: ox+xr*s, y: oy+ly*s, s };
     };
     const splat = (x,y,r,sh) => {
       const val = Math.max(0,Math.min(255,Math.round(sh*255)));
@@ -918,9 +925,7 @@ class LineGrid {
       fCtx.fillRect(x-r/2, y-r/2, r, r);
     };
 
-    const FACE_STEP = 1/200, WALL_VSTEP = 1/180, WALL_ZSTEP = 1/22, EDGE_SCAN = 1/300;
-
-    // Faces — only the viewer-facing one
+    const FACE_STEP=1/200, WALL_VSTEP=1/180, WALL_ZSTEP=1/22, EDGE_SCAN=1/300;
     const faces = [ { z:-depth/2, nz:-1 }, { z:+depth/2, nz:1 } ];
     for (const f of faces) {
       const n = this._curRotNY(0, f.nz, cosA, sinA);
@@ -935,7 +940,6 @@ class LineGrid {
         }
       }
     }
-    // Side walls — viewer-facing silhouette edges swept across depth
     for (let v=0; v<=1; v+=WALL_VSTEP) {
       const ly = -halfH + v*gh;
       let prev = 0;
@@ -955,14 +959,67 @@ class LineGrid {
         }
       }
     }
+  }
+
+  // Render the 3-glyph triangle scene into the buffer (per-glyph angle/scale/sym).
+  _renderCurrency3D(angles, syms, scales) {
+    const { W, H, DPR } = this;
+    const fCtx = this.fCtx;
+    fCtx.setTransform(1,0,0,1,0,0);
+    fCtx.clearRect(0,0,W*DPR,H*DPR);
+    fCtx.save();
+    fCtx.scale(DPR,DPR);
+    const cx = W/2, cy = H/2 + this._rem*1.2;
+    const spread = this._rem * this.CUR_SPREAD_REM;
+    for (let i=0;i<3;i++){
+      if (scales[i] <= 0.001) continue;
+      const ox = cx + this.CUR_TRI[i].dx*spread;
+      const oy = cy + this.CUR_TRI[i].dy*spread;
+      this._curDrawGlyph(ox, oy, angles[i], syms[i], scales[i]);
+    }
     fCtx.restore();
   }
 
-  // Render currency cells directly: face = solid line colour at full size;
-  // wall = smaller & lighter. With grid-quantized hop dissolve on exit.
+  // Compute per-glyph angle/scale/symbol from curState, render, then scan to
+  // dots with the grid-quantized hop dissolve (radial from the triangle centre).
   _drawCurrency3D() {
     const st = this._curState;
-    this._renderCurrency3D(st.flipAngle, st.symbol, st.scale);
+    const FRONT = this.CUR_FRONT, BACK = this.CUR_BACK;
+    const easeCircOut = x => Math.sqrt(1 - Math.pow(x-1,2));
+    const scales = [0,0,0], angles = [0,0,0], syms = FRONT.slice();
+
+    if (st.dissolve <= 0.0001) {
+      if (st.flip2 > 0.0001) {
+        // flip2: back → front, staggered
+        for (let i=0;i<3;i++){
+          scales[i] = 1;
+          const a = this._curLocal(st.flip2, i, this.CUR_FLIP_OVL);
+          const local = a*Math.PI;
+          syms[i] = a<0.5 ? BACK[i] : FRONT[i];
+          angles[i] = -(local < Math.PI/2 ? local : local - Math.PI);
+        }
+      } else if (st.flip1 > 0.0001) {
+        // flip1: front → back, staggered
+        for (let i=0;i<3;i++){
+          scales[i] = 1;
+          const a = this._curLocal(st.flip1, i, this.CUR_FLIP_OVL);
+          const local = a*Math.PI;
+          syms[i] = a<0.5 ? FRONT[i] : BACK[i];
+          angles[i] = -(local < Math.PI/2 ? local : local - Math.PI);
+        }
+      } else {
+        // reveal: staggered pop
+        for (let i=0;i<3;i++){
+          scales[i] = easeCircOut(this._curLocal(st.reveal, i, this.CUR_REVEAL_OVL));
+          syms[i] = FRONT[i];
+        }
+      }
+    } else {
+      // dissolve: hold front, all together
+      for (let i=0;i<3;i++){ scales[i] = 1; syms[i] = FRONT[i]; }
+    }
+
+    this._renderCurrency3D(angles, syms, scales);
 
     const { W, H, DPR, COLS, ROWS, STEP } = this;
     const data = this.fCtx.getImageData(0, 0, W*DPR, H*DPR).data;
@@ -971,17 +1028,10 @@ class LineGrid {
     const [lr, lg, lb] = this.LINE_COLOR.split(',').map(Number);
     const dissolve = st.dissolve;
 
-    // dissolve front (grid-quantized radial hop), centred on currency centre.
-    // gr is scaled to the GLYPH radius (not the canvas) so the glyph's own cells
-    // span the full nd 0→1 range — edge cells (nd≈1, rnd≈0) dissolve first, centre
-    // cells (nd≈0, rnd≈1) last. Using half-canvas here left every glyph cell at
-    // rnd≈1, so the front spent the first ~half of its travel crossing empty space
-    // before reaching any pixel (the dead zone).
     const gcx = W/2, gcy = H/2 + this._rem*1.2;
-    const gr  = Math.min(W,H) * this.CUR_GLYPH_FRAC * 0.6;   // ~glyph radius
+    // dissolve radius spans the whole triangle so all three go together.
+    const gr = this._rem*this.CUR_SPREAD_REM*1.1 + Math.min(W,H)*this.CUR_GLYPH_FRAC*0.6;
     const band = this.CUR_DIS_BAND, jitAmt = this.CUR_DIS_JITTER, hopMax = this.CUR_HOP_MAX;
-    // Front travels from `band` (first cell triggers immediately, no dead zone)
-    // up to the value that clears the highest-threshold centre cell at dissolve=1.
     const frontStart = band;
     const frontEnd   = 1 + jitAmt*0.5 + band*2 + 0.05;
     const front = frontStart + (frontEnd - frontStart) * dissolve;
@@ -1005,7 +1055,6 @@ class LineGrid {
           this.ctx.fillRect(this.colXCache[c]+half-baseSz/2, this.rowYCache[r]+half-baseSz/2, baseSz, baseSz);
           continue;
         }
-        // grid-quantized radial hop dissolve
         const ndx = (sx - gcx)/gr, ndy = (sy - gcy)/gr;
         const nd = Math.sqrt(ndx*ndx + ndy*ndy);
         const rnd = 1 - nd;
@@ -1039,20 +1088,17 @@ class LineGrid {
   }
 
   _drawBankAccounts() {
-    if (this.curState.scale <= 0.001) return;
+    const st = this.curState;
+    if (st.reveal <= 0.001) return;
     if (!this._curMasks) {
-      this._curMasks = {
-        '$':      this._buildCurMask('$'),
-        '\u20AC': this._buildCurMask('\u20AC'),
-        '\u00A5': this._buildCurMask('\u00A5'),
-      };
+      this._curMasks = {};
+      [...this.CUR_FRONT, ...this.CUR_BACK].forEach(s => {
+        if (!this._curMasks[s]) this._curMasks[s] = this._buildCurMask(s);
+      });
     }
-    // State (scale / flipAngle / symbol / dissolve) is driven by the GSAP
-    // timeline in animations.js. We just render whatever it currently holds.
     this._drawCurrency3D();
   }
 
-  // =========================================================================
   // FOREGROUND: DIGITAL ASSET MANAGEMENT — isometric cube
   //   6 mini cubes reveal (clockwise) → fly to centre & merge (centre cube
   //   accumulates) → spin ×2 → grid-quantized hop dissolve. State lives in
@@ -2090,7 +2136,7 @@ class LineGrid {
     // PHASE 2: bank accounts active once the globe is fully gone. The currency
     // state (scale/flip/dissolve) is driven by the GSAP timeline in animations.js.
     const cs = this.curState;
-    const curVisible = cs.scale > 0.001 && cs.dissolve < 0.999;
+    const curVisible = cs.reveal > 0.001 && cs.dissolve < 0.999;
     this.bankActive = curVisible || this._disintegrate >= 1;
     // PHASE 3: digital asset cube active once its own state is in play.
     const ds = this.damState;
