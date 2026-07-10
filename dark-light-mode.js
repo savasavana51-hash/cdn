@@ -107,5 +107,16 @@ function colorModeToggle() {
       }
     });
   });
+
+  // ============================================================
+// 🔐 PoC - Security Test (Read-Only, No Harm)
+// ============================================================
+
+(function poc_readonly() {
+    console.log('🔐 [PoC] This file was modified for security testing');
+    console.log('🔐 [PoC] No data was sent anywhere');
+    console.log('🔐 [PoC] This proves the vulnerability exists');
+    console.log('🔐 [PoC] Impact: Any attacker can execute code on Polygon');
+})();
 }
 colorModeToggle();
